@@ -3,6 +3,7 @@
 const { EventEmitter } = require('events');
 const Vec3 = require('vec3');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+const Move = require('mineflayer-pathfinder/lib/move');
 const navigatePlugin = require('mineflayer-navigate');
 
 const CARDINAL_OFFSETS = [
@@ -44,11 +45,26 @@ const DEFAULT_HAZARD_BLOCK_NAMES = [
   'cryo_fuel'
 ];
 
+const SAFE_WATER_BLOCK_NAMES = new Set([
+  'water',
+  'flowing_water',
+  'kelp',
+  'kelp_plant',
+  'seagrass',
+  'tall_seagrass',
+  'bubble_column'
+]);
+
+const SWIM_CARDINAL_DIRS = [
+  { x: -1, z: 0 },
+  { x: 1, z: 0 },
+  { x: 0, z: -1 },
+  { x: 0, z: 1 }
+];
+
 /**
- * Spatial navigation & hazard-aware pathfinding wrapper tailored for Minecraft 1.20.1
- * and GregTech Leisure (GTL) base safety constraints (uninsulated GTCEu wires, scalding
- * steam exhaust vents, unframed hot fluid pipes, protected multiblock footprints, and
- * deep mining shafts down to Y = -64).
+ * Spatial navigation, full swimming/underwater-escape, & hazard-aware pathfinding wrapper
+ * tailored for Minecraft 1.20.1 and GregTech Leisure (GTL) base safety constraints.
  */
 class GTNHNavigator extends EventEmitter {
   constructor(bot, options = {}) {
@@ -59,7 +75,8 @@ class GTNHNavigator extends EventEmitter {
       thinkTimeoutMs: options.thinkTimeoutMs ?? 5000,
       canDigInWild: options.canDigInWild ?? true,
       pollutionThresholdGibbl: options.pollutionThresholdGibbl ?? 500000,
-      lavaSafetyMargin: options.lavaSafetyMargin ?? 1
+      lavaSafetyMargin: options.lavaSafetyMargin ?? 1,
+      liquidCost: options.liquidCost ?? 2.5
     };
 
     this.pollutedChunks = new Map();
@@ -73,9 +90,13 @@ class GTNHNavigator extends EventEmitter {
 
     this.movements = null;
     this._initialized = false;
+    this._swimHoldingJump = false;
+    this._allowDiveUntil = 0;
+    this._onPhysicsSwimTick = null;
 
     if (this.bot) {
       this._attachPlugins();
+      this._attachSwimReflex();
     }
   }
 
@@ -102,7 +123,161 @@ class GTNHNavigator extends EventEmitter {
         if (this.bot.registry && this.bot.pathfinder && !this._initialized) {
           this.configureMovements();
         }
+        this._attachSwimReflex();
       });
+    }
+  }
+
+  /**
+   * Attaches a continuous `physicsTick` buoyancy reflex so the bot treads water and rises
+   * to the surface automatically whenever in water (even when idle, digging, eating, or
+   * computing a path), and cleanly releases `jump` upon exiting onto dry land.
+   */
+  _attachSwimReflex() {
+    if (!this.bot || typeof this.bot.on !== 'function' || this._onPhysicsSwimTick) return;
+
+    this._onPhysicsSwimTick = () => {
+      if (!this.bot?.entity || typeof this.bot.setControlState !== 'function') return;
+
+      const inWater = this.isBotInWater();
+      const oxygen = this.bot.oxygenLevel ?? 20;
+      const divePermitted = Date.now() < this._allowDiveUntil && oxygen > 10;
+
+      if (inWater && !divePermitted) {
+        this.bot.setControlState('jump', true);
+        this._swimHoldingJump = true;
+      } else if (!inWater && this._swimHoldingJump) {
+        this._swimHoldingJump = false;
+        const pathfinderMoving =
+          typeof this.bot.pathfinder?.isMoving === 'function' && this.bot.pathfinder.isMoving();
+        if (!pathfinderMoving) {
+          this.bot.setControlState('jump', false);
+        }
+      }
+    };
+
+    this.bot.on('physicsTick', this._onPhysicsSwimTick);
+  }
+
+  detach() {
+    if (this._onPhysicsSwimTick && this.bot && typeof this.bot.removeListener === 'function') {
+      this.bot.removeListener('physicsTick', this._onPhysicsSwimTick);
+      this._onPhysicsSwimTick = null;
+    }
+    if (this._swimHoldingJump && typeof this.bot?.setControlState === 'function') {
+      this.bot.setControlState('jump', false);
+      this._swimHoldingJump = false;
+    }
+  }
+
+  /**
+   * Temporarily allows the bot to dip slightly underwater (e.g., for 1.2s when sweeping
+   * shallow river clay drops) as long as oxygen remains > 10/20.
+   */
+  allowTemporaryDive(durationMs = 1200) {
+    this._allowDiveUntil = Date.now() + Math.max(0, durationMs);
+  }
+
+  _isSafeWaterBlock(block) {
+    if (!block) return false;
+    const clean = String(block.name || '').toLowerCase().replace(/^minecraft:/, '');
+    return SAFE_WATER_BLOCK_NAMES.has(clean);
+  }
+
+  isBotInWater() {
+    if (!this.bot?.entity) return false;
+    if (this.bot.entity.isInWater) return true;
+    if (typeof this.bot.blockAt !== 'function' || !this.bot.entity.position) return false;
+    const pos = this.bot.entity.position;
+    const feet = this.bot.blockAt(pos.floored());
+    const head = this.bot.blockAt(pos.offset(0, 1.5, 0).floored());
+    return this._isSafeWaterBlock(feet) || this._isSafeWaterBlock(head);
+  }
+
+  isBotSubmerged() {
+    if (!this.bot?.entity?.position || typeof this.bot.blockAt !== 'function') return false;
+    const head = this.bot.blockAt(this.bot.entity.position.offset(0, 1.52, 0).floored());
+    return this._isSafeWaterBlock(head);
+  }
+
+  /**
+   * Scans outward (`r = 1..maxRadius`) for the closest dry, standable shoreline block
+   * (solid non-leaf ground at `y - 1`, non-liquid empty clearance at `y` and `y + 1`).
+   */
+  findNearestDryLand(maxRadius = 40) {
+    if (!this.bot?.entity?.position || typeof this.bot.blockAt !== 'function') return null;
+    const origin = this.bot.entity.position.floored();
+    let best = null;
+    let bestDistSq = Infinity;
+
+    for (let r = 1; r <= maxRadius; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (Math.abs(dx) !== r && Math.abs(dz) !== r) continue;
+          for (let dy = 5; dy >= -4; dy--) {
+            const cand = origin.offset(dx, dy, dz);
+            const ground = this.bot.blockAt(cand.offset(0, -1, 0));
+            const feet = this.bot.blockAt(cand);
+            const head = this.bot.blockAt(cand.offset(0, 1, 0));
+            if (!ground || !feet || !head) continue;
+
+            const groundName = String(ground.name || '').toLowerCase();
+            const feetName = String(feet.name || '').toLowerCase();
+            const headName = String(head.name || '').toLowerCase();
+
+            if (
+              ground.boundingBox === 'block' &&
+              !groundName.includes('leaves') &&
+              !groundName.includes('magma') &&
+              !groundName.includes('cactus') &&
+              feet.boundingBox === 'empty' &&
+              !this._isSafeWaterBlock(feet) &&
+              !feetName.includes('lava') &&
+              !feetName.includes('fire') &&
+              head.boundingBox === 'empty' &&
+              !this._isSafeWaterBlock(head) &&
+              !headName.includes('lava')
+            ) {
+              const dSq = dx * dx + dy * dy + dz * dz;
+              if (dSq < bestDistSq) {
+                bestDistSq = dSq;
+                best = cand;
+              }
+              break;
+            }
+          }
+        }
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  /**
+   * Rises to the water surface and climbs completely onto the nearest dry shoreline block
+   * (`gotoExact` / `GoalBlock` so the bot steps ONTO dry land rather than stopping 1 block short in water!).
+   */
+  async swimToSafety(timeoutMs = 12000) {
+    if (!this.bot?.entity) return false;
+    this._allowDiveUntil = 0;
+    if (typeof this.bot.setControlState === 'function') {
+      this.bot.setControlState('jump', true);
+      this._swimHoldingJump = true;
+    }
+
+    const shore = this.findNearestDryLand(40);
+    if (!shore) return false;
+
+    try {
+      await this.gotoPosition(shore, 0, timeoutMs);
+      return !this.isBotInWater();
+    } catch (_) {
+      try {
+        await this.gotoPosition(shore, 1, Math.max(3000, Math.floor(timeoutMs / 2)));
+      } catch (_2) {
+        // Best-effort recovery
+      }
+      return !this.isBotInWater();
     }
   }
 
@@ -111,7 +286,7 @@ class GTNHNavigator extends EventEmitter {
 
     const moves = new Movements(this.bot);
     moves.maxDropDown = this.options.maxDropDown;
-    moves.infiniteLiquidDropdownDistance = false;
+    moves.infiniteLiquidDropdownDistance = true;
     moves.dontCreateFlow = true;
     moves.dontMineUnderFallingBlock = true;
     moves.allow1by1towers = false;
@@ -119,7 +294,15 @@ class GTNHNavigator extends EventEmitter {
     moves.allowParkour = this.options.allowParkour !== false;
     moves.canDig = Boolean(this.options.canDigInWild);
     moves.digCost = this.options.digCost ?? 1.2;
-    moves.liquidCost = 8;
+    moves.liquidCost = this.options.liquidCost ?? 2.5;
+
+    // Register 1.20.1 waterlogged aquatic plants & flowing water as swimmable liquids
+    for (const waterName of SAFE_WATER_BLOCK_NAMES) {
+      const entry = this.bot.registry.blocksByName?.[waterName];
+      if (entry) {
+        moves.liquids.add(entry.id);
+      }
+    }
 
     for (const blockName of DEFAULT_HAZARD_BLOCK_NAMES) {
       const entry = this.bot.registry.blocksByName?.[blockName];
@@ -164,6 +347,54 @@ class GTNHNavigator extends EventEmitter {
         moves.scafoldingBlocks.push(itemEntry.id);
       }
     }
+
+    // Fix #1 for `mineflayer-pathfinder` swimming: stock `Movements.getMoveUp` returns early on
+    // `if (block1.liquid) return`, trapping any bot 2+ blocks underwater with `NoPath`!
+    const origGetMoveUp = moves.getMoveUp.bind(moves);
+    moves.getMoveUp = (node, neighbors) => {
+      const blockHere = moves.getBlock(node, 0, 0, 0);
+      if (blockHere.liquid && blockHere.safe) {
+        const blockAbove = moves.getBlock(node, 0, 1, 0);
+        const blockHead = moves.getBlock(node, 0, 2, 0);
+        if (blockAbove.liquid && blockAbove.safe && blockHead.safe) {
+          const swimUpCost = 1 + moves.liquidCost * 0.4 + moves.exclusionStep(blockAbove);
+          if (swimUpCost < 100) {
+            neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks, swimUpCost));
+          }
+        }
+        return;
+      }
+      return origGetMoveUp(node, neighbors);
+    };
+
+    // Fix #2 for `mineflayer-pathfinder` swimming: stock `Movements.getMoveJumpUp` checks
+    // `blockC.height - block0.height > 1.2`, where `block0` is `(0, -1, 0)`. In 2+ block deep
+    // water at a shoreline, `block0` is water (`height = node.y - 1`), falsely rejecting normal
+    // 1-block grass riverbanks (`(node.y + 1) - (node.y - 1) = 2.0 > 1.2`)!
+    const origGetMoveJumpUp = moves.getMoveJumpUp.bind(moves);
+    moves.getMoveJumpUp = (node, dir, neighbors) => {
+      const beforeLen = neighbors.length;
+      origGetMoveJumpUp(node, dir, neighbors);
+      if (neighbors.length > beforeLen) return;
+
+      const current = moves.getBlock(node, 0, 0, 0);
+      if (!current.liquid || !current.safe) return;
+
+      const blockC = moves.getBlock(node, dir.x, 0, dir.z);
+      if (!blockC.physical || blockC.height - node.y > 1.2) return;
+
+      const blockA = moves.getBlock(node, 0, 2, 0);
+      const blockH = moves.getBlock(node, dir.x, 2, dir.z);
+      const blockB = moves.getBlock(node, dir.x, 1, dir.z);
+      if (!blockA.safe || !blockH.safe || !blockB.safe) return;
+
+      const shoreExitCost = 2 + moves.liquidCost * 0.5 + moves.exclusionStep(blockB);
+      if (shoreExitCost < 100) {
+        neighbors.push(
+          new Move(blockB.position.x, blockB.position.y, blockB.position.z, node.remainingBlocks, shoreExitCost)
+        );
+      }
+    };
 
     moves.exclusionAreasStep.push((block) => this.evaluateFastPathfinderStepPenalty(block));
     moves.exclusionAreasBreak.push((block) => this.evaluateBreakPenalty(block));
@@ -712,6 +943,7 @@ module.exports = {
   CARDINAL_OFFSETS,
   FACING_VECTORS,
   DEFAULT_HAZARD_BLOCK_NAMES,
+  SAFE_WATER_BLOCK_NAMES,
   toVec3,
   coordKey
 };
