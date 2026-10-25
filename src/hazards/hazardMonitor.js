@@ -6,9 +6,10 @@ const nbt = require('prismarine-nbt');
 const { VOLTAGE_TIER_ORDER } = require('../craftingEngine');
 
 /**
- * Vanilla 1.7.10 potion effect IDs inflicted by GregTech chunk pollution (>500k gibbl).
+ * Minecraft 1.20.1 MobEffect IDs triggered by GregTech environmental hazards,
+ * chemical leaks, or toxic planetary atmospheres.
  */
-const GTNH_POLLUTION_EFFECT_IDS = new Set([
+const GTL_HAZARD_EFFECT_IDS = new Set([
   2,  // Slowness
   4,  // Mining Fatigue
   9,  // Nausea
@@ -16,13 +17,18 @@ const GTNH_POLLUTION_EFFECT_IDS = new Set([
   17, // Hunger
   18, // Weakness
   19, // Poison
-  20  // Wither
+  20, // Wither
+  33  // Darkness (1.20.1)
 ]);
 
 const HOSTILE_MOB_NAMES = new Set([
   'creeper',
   'skeleton',
+  'stray',
+  'wither_skeleton',
   'zombie',
+  'husk',
+  'drowned',
   'spider',
   'cave_spider',
   'witch',
@@ -31,43 +37,37 @@ const HOSTILE_MOB_NAMES = new Set([
   'ghast',
   'slime',
   'magma_cube',
-  'wisp',
-  'taintacle',
-  'thaumic_slime',
-  'hellhound'
+  'phantom',
+  'pillager',
+  'vindicator',
+  'ravager',
+  'warden',
+  'corrupted_lunarian',
+  'star_crawler'
 ]);
 
-const INFERNAL_MODIFIER_KEYWORDS = [
+const ELITE_OR_CHAMPION_KEYWORDS = [
+  'champion',
+  'apotheotic',
+  'boss',
+  'infernal',
   '1up',
   'fiery',
   'vengeance',
   'berserk',
   'ender',
-  'ghastly',
-  'webber',
   'storm',
-  'choke',
   'wither',
   'alchemist',
-  'sapper',
-  'ninja',
-  'sticky'
+  'sapper'
 ];
 
 /**
- * GTNH-Specific Volatility, Weather, Power Telemetry, Pollution, and Combat Sensor Suite.
+ * GregTech Leisure (GTL 1.20.1) Volatility, Dry-Boiler Explosion Guard,
+ * EU P2P / Cable Over-Voltage Guard, Power Hysteresis (`recipeProgressLowEnergy`),
+ * Weather Protection, and Combat/Atmosphere Sensor Suite.
  */
 class HazardMonitor extends EventEmitter {
-  /**
-   * @param {Object} [options]
-   * @param {import('mineflayer').Bot|null} [options.bot]
-   * @param {import('../navigation/gtnhNavigator').GTNHNavigator|null} [options.navigator]
-   * @param {number} [options.criticalEuThresholdRatio=0.20]
-   * @param {number} [options.recoveryEuThresholdRatio=0.50]
-   * @param {number} [options.hostileAlertRadius=12]
-   * @param {number} [options.creeperBlastEvadeRadius=8]
-   * @param {Vec3} [options.safeShelterPos]
-   */
   constructor(options = {}) {
     super();
     this.bot = options.bot || null;
@@ -88,23 +88,32 @@ class HazardMonitor extends EventEmitter {
     this.thunderLevel = 0;
     this.exteriorWiringLocked = false;
 
-    // Registered GregTech electric machines: machineId -> descriptor
+    // Registered GTCEu electric machines: machineId -> descriptor
     this.electricMachines = new Map();
 
-    // Registered GregTech Battery Buffers / Steam Turbines: bufferId -> descriptor
+    // Registered GTCEu Steam Boilers (`gtceu:lp_steam_solid_boiler`, etc.) for dry-boil explosion guard
+    this.steamBoilers = new Map();
+
+    // Registered GTCEu Battery Buffers (`gtceu:lv_battery_buffer_4x`) / Large Boilers
     this.powerBuffers = new Map();
     this.lowPowerHalted = false;
     this.lastNetEuPerTick = 0;
 
-    // Pollution & entity status
+    // Environmental debuffs & entity threats
     this.activePlayerEffects = new Map();
     this.inPollutedZone = false;
     this.currentThreats = [];
     this.emergencyPacketLog = [];
+    this._packetSequence = 0;
 
     if (this.bot) {
       this.attachToBot(this.bot);
     }
+  }
+
+  _nextSequence() {
+    this._packetSequence = (this._packetSequence + 1) % 1000000;
+    return this._packetSequence;
   }
 
   attachToBot(bot) {
@@ -124,28 +133,23 @@ class HazardMonitor extends EventEmitter {
     }
 
     const client = bot._client;
-    if (client && typeof client.on === 'function') {
-      // Packet-level weather sensor (1.7.10 / 1.8 packet_game_state_change)
+    if (client && typeof client.on !== 'function') return;
+
+    if (client) {
       client.on('game_state_change', (packet) => {
         this.handleGameStatePacket(packet);
       });
 
-      // Packet-level TileEntity telemetry for GregTech Battery Buffers / Machines
       client.on('tile_entity_data', (packet) => {
         this.handleTileEntityPacket(packet);
       });
 
-      // Packet-level potion debuff sensor for GTNH pollution clouds
       client.on('entity_effect', (packet) => {
         this.handleEntityEffectPacket(packet);
       });
     }
   }
 
-  /**
-   * Registers an electric GregTech machine so the monitor can disable it immediately
-   * if rain/storms hit while the machine is unroofed.
-   */
   registerElectricMachine({
     id,
     position,
@@ -169,25 +173,89 @@ class HazardMonitor extends EventEmitter {
   }
 
   /**
-   * Validates GTNH cable-to-machine voltage safety BEFORE placing a wire/cable.
-   * Connecting higher voltage (e.g. MV 128 EU/t) into a lower-tier machine (e.g. LV 32 EU/t)
-   * without a Transformer causes an instant machine explosion in GregTech!
+   * Registers a GTCEu Steam Boiler (`gtceu:lp_steam_solid_boiler`, `gtceu:hp_steam_solid_boiler`,
+   * `gtceu:bronze_large_boiler`) to guard against GTL's dry-boiler water explosion mechanic
+   * (GTL Quest `4BFC342697BDE75A`).
    */
-  verifySafeCableConnection(cableVoltageTier, machineVoltageTier) {
-    const srcRank = VOLTAGE_TIER_ORDER[cableVoltageTier] ?? 99;
-    const dstRank = VOLTAGE_TIER_ORDER[machineVoltageTier] ?? 0;
+  registerSteamBoiler({
+    id,
+    position,
+    temperatureC = 20,
+    maxTemperatureC = 500,
+    waterMb = 16000
+  }) {
+    const pos = position instanceof Vec3
+      ? position.floored()
+      : new Vec3(position.x, position.y, position.z).floored();
+    const record = {
+      id,
+      position: pos,
+      temperatureC: Number(temperatureC) || 20,
+      maxTemperatureC: Number(maxTemperatureC) || 500,
+      waterMb: Math.max(0, Number(waterMb) || 0),
+      updatedAt: Date.now()
+    };
+    this.steamBoilers.set(id, record);
+    return record;
+  }
 
-    if (this.exteriorWiringLocked) {
+  updateBoilerTelemetry(id, { temperatureC, waterMb }) {
+    const boiler = this.steamBoilers.get(id);
+    if (!boiler) return null;
+    if (Number.isFinite(temperatureC)) boiler.temperatureC = temperatureC;
+    if (Number.isFinite(waterMb)) boiler.waterMb = Math.max(0, waterMb);
+    boiler.updatedAt = Date.now();
+
+    if (boiler.waterMb === 0 && boiler.temperatureC >= 100) {
+      this.emit('dryBoilerWarning', {
+        id: boiler.id,
+        position: boiler.position,
+        temperatureC: boiler.temperatureC,
+        waterMb: boiler.waterMb
+      });
+    }
+    return boiler;
+  }
+
+  /**
+   * GTL Dry-Boiler Explosion Guard (Quest `4BFC342697BDE75A`):
+   * Adding water to a dry GTCEu Steam Boiler whose temperature exceeds 100 C causes an
+   * instant catastrophic steam explosion! Blocks water injection until cooled <= 95 C.
+   */
+  verifySafeBoilerWaterFill(boilerId) {
+    const boiler = this.steamBoilers.get(boilerId);
+    if (!boiler) {
+      return { safe: true, reason: null };
+    }
+    if (boiler.waterMb <= 0 && boiler.temperatureC > 95) {
       return {
         safe: false,
-        reason: 'Exterior wiring locked due to active rain/storm over-voltage explosion risk'
+        reason: `Dry GTCEu boiler '${boilerId}' is at ${boiler.temperatureC}C (>95C); injecting water now will cause a steam explosion! Cut fuel and cool below 95C first.`
+      };
+    }
+    return { safe: true, reason: null };
+  }
+
+  /**
+   * Validates GTCEu cable-to-machine AND MAE2 EU P2P (`mae2:eu_p2p_tunnel`) voltage safety
+   * BEFORE connecting power (GTL Quest `4B66FAB975B2C7D2`: EU P2P tunnels do NOT step voltage!).
+   */
+  verifySafeCableConnection(sourceVoltageTier, machineVoltageTier, options = {}) {
+    const srcRank = VOLTAGE_TIER_ORDER[sourceVoltageTier] ?? 99;
+    const dstRank = VOLTAGE_TIER_ORDER[machineVoltageTier] ?? 0;
+
+    if (this.exteriorWiringLocked && !options.indoorRoofed) {
+      return {
+        safe: false,
+        reason: 'Exterior wiring locked due to active rain/storm machine fire/explosion risk'
       };
     }
 
     if (srcRank > dstRank) {
+      const viaLabel = options.viaEuP2P ? ' (via mae2:eu_p2p_tunnel — does NOT step voltage!)' : '';
       return {
         safe: false,
-        reason: `Catastrophic GTNH over-voltage: ${cableVoltageTier} source exceeds ${machineVoltageTier} machine rating`
+        reason: `Catastrophic GTCEu over-voltage${viaLabel}: ${sourceVoltageTier} source exceeds ${machineVoltageTier} machine rating`
       };
     }
 
@@ -195,10 +263,10 @@ class HazardMonitor extends EventEmitter {
   }
 
   /**
-   * Checks whether `position` (or its 4 horizontal neighbors, per GT5u splash-ignition rules!)
-   * lacks a solid roof overhead up to `maxScanHeight`.
+   * Checks whether `position` (or its 4 horizontal neighbors) lacks a solid roof overhead
+   * in Minecraft 1.20.1 world coordinates (up to `Y = 320`).
    */
-  isExposedToSky(position, maxScanHeight = 128) {
+  isExposedToSky(position, maxScanHeight = 160) {
     if (!this.bot || typeof this.bot.blockAt !== 'function') {
       return true;
     }
@@ -216,12 +284,18 @@ class HazardMonitor extends EventEmitter {
 
     for (const col of checkColumns) {
       let hasRoof = false;
-      const topY = Math.min(255, col.y + maxScanHeight);
+      const topY = Math.min(320, col.y + maxScanHeight);
       for (let y = col.y + 1; y <= topY; y++) {
         const blk = this.bot.blockAt(new Vec3(col.x, y, col.z));
         if (!blk) break;
         const name = (blk.name || '').toLowerCase();
-        if (blk.type !== 0 && name !== 'air' && name !== 'cave_air' && name !== 'void_air') {
+        if (
+          blk.type !== 0 &&
+          name !== 'air' &&
+          name !== 'minecraft:air' &&
+          name !== 'cave_air' &&
+          name !== 'void_air'
+        ) {
           hasRoof = true;
           break;
         }
@@ -234,10 +308,6 @@ class HazardMonitor extends EventEmitter {
     return false;
   }
 
-  /**
-   * Processes raw `game_state_change` weather packets (`start_raining`, `stop_raining`,
-   * `rain_level_change`, `thunder_level_change`).
-   */
   handleGameStatePacket(packet) {
     if (!packet) return;
     const reason = packet.reason;
@@ -284,8 +354,8 @@ class HazardMonitor extends EventEmitter {
   }
 
   /**
-   * Immediately disables any active registered GregTech electric machine that is exposed
-   * to the sky without a rain cover, transmitting a Soft Mallet shutdown packet.
+   * Immediately disables any active unroofed GTCEu electric machine via a 1.20.1
+   * `gtceu:rubber_mallet` interaction packet.
    */
   disableUnroofedMachines() {
     const disabled = [];
@@ -305,20 +375,19 @@ class HazardMonitor extends EventEmitter {
 
   _sendSoftMalletTogglePacket(pos) {
     const packet = {
+      hand: 0,
       location: { x: pos.x, y: pos.y, z: pos.z },
       direction: 1,
-      heldItem: {
-        blockId: 7150, // GregTech MetaTool (Soft Mallet meta 14)
-        itemCount: 1,
-        itemDamage: 14
-      },
-      cursorX: 8,
-      cursorY: 8,
-      cursorZ: 8
+      cursorX: 0.5,
+      cursorY: 0.5,
+      cursorZ: 0.5,
+      insideBlock: false,
+      sequence: this._nextSequence()
     };
     this.emergencyPacketLog.push({
       timestamp: Date.now(),
       action: 'soft_mallet_shutdown',
+      toolItemId: 'gtceu:rubber_mallet',
       position: pos.clone(),
       packet
     });
@@ -327,12 +396,9 @@ class HazardMonitor extends EventEmitter {
     }
   }
 
-  /**
-   * Registers a GregTech Battery Buffer, LESU, or Steam Turbine buffer for EU/Steam monitoring.
-   */
   registerPowerBuffer({
     id,
-    type = 'battery_buffer',
+    type = 'gtceu:lv_battery_buffer_4x',
     position,
     maxEu = 100000,
     storedEu = 100000
@@ -353,9 +419,6 @@ class HazardMonitor extends EventEmitter {
     return record;
   }
 
-  /**
-   * Updates stored EU / Steam-equivalent EU for a specific buffer and re-evaluates thresholds.
-   */
   updatePowerBufferTelemetry(idOrPos, { storedEu, maxEu }) {
     let target = null;
     if (typeof idOrPos === 'string') {
@@ -390,8 +453,8 @@ class HazardMonitor extends EventEmitter {
   }
 
   /**
-   * Parses incoming `tile_entity_data` NBT packets from GregTech machines / Battery Buffers
-   * (`mStoredEnergy`, `mStoredSteam`, and internal battery `Inventory` charge tags).
+   * Parses incoming `tile_entity_data` NBT packets from GTCEu Modern 1.20.1 block entities
+   * (`energyContainer.energyStored`, `energyStored`, `mStoredEnergy`, `steamTank`, and battery slots).
    */
   handleTileEntityPacket(packet) {
     if (!packet || !packet.location || !packet.nbtData) return;
@@ -407,17 +470,26 @@ class HazardMonitor extends EventEmitter {
     let stored = null;
     let maxCap = null;
 
-    if (Number.isFinite(simplified.mStoredEnergy)) {
+    const energyNode = simplified.energyContainer || simplified;
+    if (Number.isFinite(energyNode.energyStored)) {
+      stored = Number(energyNode.energyStored);
+    } else if (Number.isFinite(simplified.mStoredEnergy)) {
       stored = Number(simplified.mStoredEnergy);
     } else if (Number.isFinite(simplified.mStoredSteam)) {
-      // 2 mB Steam = 1 EU in GTNH LV Steam Turbines
       stored = Math.floor(Number(simplified.mStoredSteam) * 0.5);
+    }
+
+    if (Number.isFinite(energyNode.energyCapacity) && energyNode.energyCapacity > 0) {
+      maxCap = Number(energyNode.energyCapacity);
+    } else if (Number.isFinite(simplified.mMaxEnergy) && simplified.mMaxEnergy > 0) {
+      maxCap = Number(simplified.mMaxEnergy);
     }
 
     if (Array.isArray(simplified.Inventory)) {
       let batteryChargeSum = 0;
       for (const slotEntry of simplified.Inventory) {
         const charge =
+          slotEntry?.tag?.Charge ??
           slotEntry?.tag?.['GT.ItemCharge'] ??
           slotEntry?.tag?.charge ??
           0;
@@ -430,10 +502,6 @@ class HazardMonitor extends EventEmitter {
       }
     }
 
-    if (Number.isFinite(simplified.mMaxEnergy) && simplified.mMaxEnergy > 0) {
-      maxCap = Number(simplified.mMaxEnergy);
-    }
-
     if (stored !== null) {
       this.updatePowerBufferTelemetry(packet.location, {
         storedEu: stored,
@@ -442,9 +510,6 @@ class HazardMonitor extends EventEmitter {
     }
   }
 
-  /**
-   * Computes aggregate EU capacity, stored EU, and fill ratio across all registered buffers.
-   */
   getPowerTelemetry() {
     if (this.powerBuffers.size === 0) {
       return {
@@ -491,9 +556,9 @@ class HazardMonitor extends EventEmitter {
   }
 
   /**
-   * Gatekeeper consulted by `CraftingEngine` & `ContainerPacketController` before starting
-   * or continuing a GregTech machine recipe cycle. Prevents mid-recipe power stalls that
-   * destroy expensive GTNH wafers/ingots!
+   * Gatekeeper consulted before starting or continuing a GTCEu machine recipe cycle.
+   * In GregTech Leisure (`config/gtceu.yaml -> recipeProgressLowEnergy: true`), losing EU
+   * mid-craft drains recipe progress at 2x speed! Hysteresis + 15% EU safety margin prevents stalls.
    */
   canExecuteRecipeStep(step) {
     const requiresElectric = (step.euPerTick ?? 0) > 0 && step.voltageTier !== 'STONE';
@@ -502,7 +567,7 @@ class HazardMonitor extends EventEmitter {
       const tel = this.getPowerTelemetry();
       return {
         allowed: false,
-        reason: `Battery Buffer EU critically low (${(tel.fillRatio * 100).toFixed(1)}% < ${(this.criticalEuThresholdRatio * 100).toFixed(0)}% threshold)`
+        reason: `Battery Buffer EU critically low (${(tel.fillRatio * 100).toFixed(1)}% < ${(this.criticalEuThresholdRatio * 100).toFixed(0)}% threshold — GTL recipeProgressLowEnergy 2x drain guard active)`
       };
     }
 
@@ -518,7 +583,6 @@ class HazardMonitor extends EventEmitter {
     }
 
     if (requiresElectric && (this.isRaining || this.isThundering)) {
-      // Block running unroofed machines during active rain/storms
       for (const machine of this.electricMachines.values()) {
         if (machine.disabledByRainGuard) {
           return {
@@ -532,18 +596,13 @@ class HazardMonitor extends EventEmitter {
     return { allowed: true, reason: null };
   }
 
-  /**
-   * Monitors `entity_effect` packets for GTNH high-pollution debuffs (Weakness, Poison,
-   * Slowness, Nausea, Mining Fatigue), marks the chunk in `GTNHNavigator`, and emits
-   * a `'pollutionHazard'` alert for immediate evacuation.
-   */
   handleEntityEffectPacket(packet) {
     if (!packet) return;
     const botEntityId = this.bot?.entity?.id;
     if (botEntityId !== undefined && packet.entityId !== botEntityId) return;
 
     const effectId = Number(packet.effectId);
-    if (!GTNH_POLLUTION_EFFECT_IDS.has(effectId)) return;
+    if (!GTL_HAZARD_EFFECT_IDS.has(effectId)) return;
 
     this.activePlayerEffects.set(effectId, {
       effectId,
@@ -552,7 +611,6 @@ class HazardMonitor extends EventEmitter {
       recordedAt: Date.now()
     });
 
-    // Prune expired effects
     const now = Date.now();
     for (const [id, entry] of this.activePlayerEffects.entries()) {
       if (now - entry.recordedAt > entry.duration * 50 + 1000) {
@@ -560,8 +618,7 @@ class HazardMonitor extends EventEmitter {
       }
     }
 
-    // Two or more simultaneous pollution symptoms (or Poison/Nausea) indicate heavy GTNH smog (>600k gibbl)
-    if (this.activePlayerEffects.size >= 2 || effectId === 9 || effectId === 19) {
+    if (this.activePlayerEffects.size >= 2 || effectId === 9 || effectId === 19 || effectId === 20) {
       this.inPollutedZone = true;
       const botPos = this.bot?.entity?.position;
       if (botPos && this.navigator) {
@@ -579,9 +636,6 @@ class HazardMonitor extends EventEmitter {
     }
   }
 
-  /**
-   * Computes a clean chunk coordinate outside any polluted chunks recorded in `GTNHNavigator`.
-   */
   computeCleanChunkEscapeTarget() {
     const pos = this.bot?.entity?.position || new Vec3(0, 64, 0);
     if (this.safeShelterPos) {
@@ -614,10 +668,6 @@ class HazardMonitor extends EventEmitter {
     return pos.offset(32, 0, 0);
   }
 
-  /**
-   * Scans `bot.entities` for nearby hostile entities and GTNH Infernal Mobs, returning
-   * prioritized tactical responses (`CRITICAL_EVADE` vs `ENGAGE_DEFENSE`).
-   */
   scanNearbyThreats() {
     if (!this.bot?.entities || !this.bot?.entity?.position) {
       this.currentThreats = [];
@@ -643,7 +693,7 @@ class HazardMonitor extends EventEmitter {
       const distance = botPos.distanceTo(entity.position);
       if (distance > this.hostileAlertRadius) continue;
 
-      const isInfernal = INFERNAL_MODIFIER_KEYWORDS.some((kw) => customTag.includes(kw));
+      const isInfernal = ELITE_OR_CHAMPION_KEYWORDS.some((kw) => customTag.includes(kw));
       const isCreeper = rawName.includes('creeper');
 
       const action =
@@ -674,9 +724,6 @@ class HazardMonitor extends EventEmitter {
     return threats;
   }
 
-  /**
-   * Executes defensive combat or hazard retreat for the highest-priority active threat.
-   */
   async mitigateImmediateHazard() {
     if (this.inPollutedZone) {
       const target = this.computeCleanChunkEscapeTarget();
@@ -700,7 +747,6 @@ class HazardMonitor extends EventEmitter {
       return { mitigated: 'evaded_threat', threat: topThreat };
     }
 
-    // Engage lone standard mob defensively while backing up
     const entity = this.bot?.entities?.[topThreat.entityId];
     if (entity && typeof this.bot?.attack === 'function') {
       if (typeof this.bot.lookAt === 'function') {
@@ -713,9 +759,6 @@ class HazardMonitor extends EventEmitter {
     return { mitigated: 'none' };
   }
 
-  /**
-   * Summary predicate used by the Hierarchical State Machine's top-level preemption transitions.
-   */
   hasActiveEmergency() {
     return (
       this.inPollutedZone ||
@@ -725,8 +768,10 @@ class HazardMonitor extends EventEmitter {
 }
 
 module.exports = {
-  GTNH_POLLUTION_EFFECT_IDS,
+  GTL_HAZARD_EFFECT_IDS,
+  GTNH_POLLUTION_EFFECT_IDS: GTL_HAZARD_EFFECT_IDS,
   HOSTILE_MOB_NAMES,
-  INFERNAL_MODIFIER_KEYWORDS,
+  ELITE_OR_CHAMPION_KEYWORDS,
+  INFERNAL_MODIFIER_KEYWORDS: ELITE_OR_CHAMPION_KEYWORDS,
   HazardMonitor
 };

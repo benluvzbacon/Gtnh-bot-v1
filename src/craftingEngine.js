@@ -23,12 +23,20 @@ const VOLTAGE_TIER_ORDER = Object.freeze({
   LuV: 6,
   ZPM: 7,
   UV: 8,
-  UHV: 9
+  UHV: 9,
+  UEV: 10,
+  UIV: 11,
+  UXV: 12,
+  OpV: 13,
+  MAX: 14
 });
 
+const EMPTY_SLOT_120 = Object.freeze({ present: false });
+
 /**
- * Spatial warehouse ledger indexing chests, JABBA barrels, Storage Drawers,
- * and GregTech Super/Quantum Chests + Fluid Tanks by 3D world coordinates.
+ * Spatial warehouse ledger indexing chests, Sophisticated Storage barrels/shulkers,
+ * Functional Storage drawers, AE2 interfaces, and GTCEu Super/Quantum Chests + Drums
+ * by 3D world coordinates (`dimension:x,y,z`).
  */
 class WarehouseTracker extends EventEmitter {
   /**
@@ -38,36 +46,22 @@ class WarehouseTracker extends EventEmitter {
   constructor(options = {}) {
     super();
     this.registryBridge = options.registryBridge || new ForgeRegistryBridge();
-    /**
-     * Map of containerKey (`dim:x,y,z`) -> {
-     *   key: string,
-     *   position: Vec3,
-     *   dimension: number,
-     *   containerType: string,
-     *   contents: Map<string, number>,
-     *   slots: Map<number, { itemId: string, count: number }>,
-     *   lastScannedAt: number
-     * }
-     */
     this.containers = new Map();
   }
 
-  static makeKey(pos, dimension = 0) {
+  static makeKey(pos, dimension = 'minecraft:overworld') {
     const p = pos instanceof Vec3 ? pos.floored() : new Vec3(pos.x, pos.y, pos.z).floored();
     return `${dimension}:${p.x},${p.y},${p.z}`;
   }
 
   /**
    * Indexes or updates a storage container's contents at `(x, y, z)`.
-   * @param {Vec3|{x:number,y:number,z:number}} position
-   * @param {Array<{itemId?: string, type?: number, metadata?: number, count: number, slot?: number}>|Object} items
-   * @param {Object} [meta]
    */
   upsertContainer(position, items, meta = {}) {
     const pos = position instanceof Vec3
       ? position.floored()
       : new Vec3(position.x, position.y, position.z).floored();
-    const dimension = meta.dimension ?? 0;
+    const dimension = meta.dimension ?? 'minecraft:overworld';
     const key = WarehouseTracker.makeKey(pos, dimension);
 
     const contents = new Map();
@@ -75,14 +69,15 @@ class WarehouseTracker extends EventEmitter {
 
     if (Array.isArray(items)) {
       items.forEach((raw, idx) => {
-        if (!raw || (raw.count ?? 0) <= 0) return;
-        const canonical = raw.itemId
+        if (!raw || (raw.count ?? raw.itemCount ?? 0) <= 0) return;
+        const count = raw.count ?? raw.itemCount ?? 0;
+        const canonical = raw.itemId && typeof raw.itemId === 'string'
           ? normalizeItemId(raw.itemId)
           : this.registryBridge.toCanonicalItemId(raw);
         if (!canonical) return;
         const slotIndex = raw.slot ?? idx;
-        contents.set(canonical, (contents.get(canonical) || 0) + raw.count);
-        slots.set(slotIndex, { itemId: canonical, count: raw.count });
+        contents.set(canonical, (contents.get(canonical) || 0) + count);
+        slots.set(slotIndex, { itemId: canonical, count });
       });
     } else if (items && typeof items === 'object') {
       let idx = 0;
@@ -112,7 +107,7 @@ class WarehouseTracker extends EventEmitter {
   /**
    * Adjusts recorded stock at a specific container coordinate after withdrawal or deposit.
    */
-  adjustContainerStock(position, itemId, delta, dimension = 0) {
+  adjustContainerStock(position, itemId, delta, dimension = 'minecraft:overworld') {
     const key = WarehouseTracker.makeKey(position, dimension);
     const container = this.containers.get(key);
     if (!container) return 0;
@@ -145,9 +140,6 @@ class WarehouseTracker extends EventEmitter {
 
   /**
    * Reads a Mineflayer bot's live inventory and merges it with indexed warehouse totals.
-   * @param {import('mineflayer').Bot|null} [bot]
-   * @param {Object<string, number>} [extraStock]
-   * @returns {Map<string, number>}
    */
   getCombinedStock(bot = null, extraStock = null) {
     const stock = this.getWarehouseTotals();
@@ -224,9 +216,10 @@ class WarehouseTracker extends EventEmitter {
 }
 
 /**
- * Packet-level container window click & GregTech GUI slot simulator.
- * Handles non-standard GregTech 5 Unofficial (GTNH) machine containers, action transaction
- * counters, phantom/ghost slots, and Programmed Circuit (#1..#24) configuration.
+ * Packet-level Minecraft 1.20.1 Container & LDLib / GTCEu Modern GUI slot controller.
+ * Synchronizes `stateId` across `window_items` and `set_slot` packets, emits 1.20.1
+ * `window_click` packets (`stateId`, `changedSlots`, `cursorItem`), and configures
+ * GTCEu `gtceu:programmed_circuit` (`{ Configuration: N }`) via Ghost Circuit or physical slot.
  */
 class ContainerPacketController extends EventEmitter {
   /**
@@ -234,7 +227,7 @@ class ContainerPacketController extends EventEmitter {
    * @param {Object} [options]
    * @param {Object} [options.windowProfiles]
    * @param {ForgeRegistryBridge} [options.registryBridge]
-   * @param {number} [options.clickDelayMs=65]
+   * @param {number} [options.clickDelayMs=55]
    */
   constructor(bot = null, options = {}) {
     super();
@@ -242,9 +235,9 @@ class ContainerPacketController extends EventEmitter {
     this.registryBridge = options.registryBridge || new ForgeRegistryBridge();
     this.windowProfiles = new Map();
     this.calibratedVectors = new Map();
-    this.clickDelayMs = options.clickDelayMs ?? 65;
+    this.clickDelayMs = options.clickDelayMs ?? 55;
 
-    this._actionCounter = 0;
+    this._stateId = 0;
     this.activeWindow = null;
     this.progressBars = new Map();
     this.packetLog = [];
@@ -265,9 +258,7 @@ class ContainerPacketController extends EventEmitter {
   }
 
   /**
-   * Registers or overrides custom click-vector slot calibration for a specific GregTech GUI.
-   * @param {string} machineProfileId - e.g. 'gt_lv_bender'
-   * @param {Object} vectorConfig - Slot overrides (inputSlots, circuitSlot, ghostCircuitSelectorSlot, etc.)
+   * Registers or overrides custom click-vector slot calibration for an LDLib / GTCEu GUI.
    */
   calibrateClickVector(machineProfileId, vectorConfig) {
     const existing = this.windowProfiles.get(machineProfileId) || { profileId: machineProfileId };
@@ -298,28 +289,39 @@ class ContainerPacketController extends EventEmitter {
     if (!client || typeof client.on !== 'function') return;
 
     client.on('open_window', (packet) => {
+      this._stateId = 0;
       this.activeWindow = {
         windowId: packet.windowId,
         inventoryType: packet.inventoryType,
         windowTitle: packet.windowTitle,
-        slotCount: packet.slotCount,
-        slots: new Array((packet.slotCount || 0) + 36).fill(null)
+        stateId: 0,
+        slots: [],
+        carriedItem: { present: false }
       };
       this.progressBars.clear();
       this.emit('windowOpened', this.activeWindow);
     });
 
     client.on('window_items', (packet) => {
+      if (Number.isInteger(packet.stateId)) {
+        this._stateId = packet.stateId;
+      }
       if (this.activeWindow && packet.windowId === this.activeWindow.windowId) {
+        this.activeWindow.stateId = this._stateId;
         this.activeWindow.slots = (packet.items || []).slice();
+        this.activeWindow.carriedItem = packet.carriedItem || { present: false };
         this.emit('windowItemsUpdated', this.activeWindow);
       }
     });
 
     client.on('set_slot', (packet) => {
+      if (Number.isInteger(packet.stateId)) {
+        this._stateId = packet.stateId;
+      }
       if (this.activeWindow && packet.windowId === this.activeWindow.windowId && packet.slot >= 0) {
+        this.activeWindow.stateId = this._stateId;
         this.activeWindow.slots[packet.slot] = packet.item;
-        this.emit('slotUpdated', { slot: packet.slot, item: packet.item });
+        this.emit('slotUpdated', { slot: packet.slot, item: packet.item, stateId: this._stateId });
       }
     });
 
@@ -329,55 +331,52 @@ class ContainerPacketController extends EventEmitter {
         this.emit('progressUpdated', { property: packet.property, value: packet.value });
       }
     });
-
-    client.on('transaction', (packet) => {
-      if (!packet.accepted && typeof client.write === 'function') {
-        // Forge/Vanilla protocol requirement: echo unaccepted transaction to resync container state
-        client.write('transaction', {
-          windowId: packet.windowId,
-          action: packet.action,
-          accepted: packet.accepted
-        });
-      }
-      this.emit('transactionAck', packet);
-    });
-  }
-
-  nextActionId() {
-    this._actionCounter = (this._actionCounter % 32766) + 1;
-    return this._actionCounter;
   }
 
   /**
-   * Emits a raw `window_click` packet targeting an exact container slot index.
+   * Emits a Minecraft 1.20.1 `window_click` packet targeting an exact container slot index.
    *
    * @param {Object} params
-   * @param {number} [params.windowId] - Defaults to currently open windowId (or 0 for player inv)
-   * @param {number} params.slot - Exact raw container slot index
+   * @param {number} [params.windowId]
+   * @param {number} params.slot
    * @param {number} [params.mouseButton=0] - 0=left, 1=right, 2=middle
-   * @param {number} [params.mode=0] - 0=click, 1=shift, 2=hotbar, 3=clone/phantom
-   * @param {Object|null} [params.clickedItem=null] - Wire slot payload ({ blockId: -1 } for empty)
+   * @param {number} [params.mode=0] - 0=pickup, 1=quick_move(shift), 2=swap, 3=clone
+   * @param {Object|null} [params.cursorItem=null] - 1.20.1 `slot` wire payload (`{ present: false }` when empty)
+   * @param {Array<{location:number, item:Object}>} [params.changedSlots]
    */
   async sendWindowClick({
     windowId,
     slot,
     mouseButton = 0,
     mode = 0,
-    clickedItem = null
+    cursorItem = null,
+    changedSlots = null
   }) {
     const resolvedWindowId =
       windowId ?? this.activeWindow?.windowId ?? this.bot?.currentWindow?.id ?? 0;
-    const action = this.nextActionId();
+    const stateId = this.activeWindow?.stateId ?? this._stateId ?? 0;
 
-    const wireItem = clickedItem || this._readSlotAsWireItem(resolvedWindowId, slot);
+    const wireCursor = cursorItem
+      ? this._normalize120Slot(cursorItem)
+      : this._readSlotAs120WireItem(resolvedWindowId, slot);
+
+    const resolvedChanges = Array.isArray(changedSlots)
+      ? changedSlots.map((entry) => ({
+          location: entry.location,
+          item: this._normalize120Slot(entry.item)
+        }))
+      : slot >= 0
+        ? [{ location: slot, item: { present: false } }]
+        : [];
 
     const payload = {
       windowId: resolvedWindowId,
+      stateId,
       slot,
       mouseButton,
-      action,
       mode,
-      item: wireItem
+      changedSlots: resolvedChanges,
+      cursorItem: wireCursor
     };
 
     this.packetLog.push({ timestamp: Date.now(), type: 'window_click', payload });
@@ -396,8 +395,20 @@ class ContainerPacketController extends EventEmitter {
     return payload;
   }
 
-  _readSlotAsWireItem(windowId, slot) {
-    if (slot < 0) return { blockId: -1 };
+  _normalize120Slot(raw) {
+    if (!raw || raw.present === false || raw.blockId === -1 || raw.itemId === -1) {
+      return { present: false };
+    }
+    return {
+      present: true,
+      itemId: raw.itemId ?? raw.type ?? raw.blockId ?? 1,
+      itemCount: raw.itemCount ?? raw.count ?? 1,
+      nbtData: raw.nbtData ?? raw.nbt ?? undefined
+    };
+  }
+
+  _readSlotAs120WireItem(windowId, slot) {
+    if (slot < 0) return { present: false };
     const winSlot =
       (this.activeWindow && this.activeWindow.windowId === windowId
         ? this.activeWindow.slots[slot]
@@ -405,31 +416,19 @@ class ContainerPacketController extends EventEmitter {
       this.bot?.currentWindow?.slots?.[slot] ||
       null;
 
-    if (!winSlot || winSlot.blockId === -1) {
-      return { blockId: -1 };
-    }
-
-    return {
-      blockId: winSlot.blockId ?? winSlot.type ?? -1,
-      itemCount: winSlot.itemCount ?? winSlot.count ?? 1,
-      itemDamage: winSlot.itemDamage ?? winSlot.metadata ?? 0,
-      nbtData: winSlot.nbtData ?? winSlot.nbt ?? undefined
-    };
+    return this._normalize120Slot(winSlot);
   }
 
   /**
    * Moves an item stack from `sourceSlot` to `destSlot` via packet-level cursor pickup & placement.
-   * Supports partial stack deposits (`count`) via right-click (`mouseButton: 1`) placement loops.
    */
   async transferSlotToSlot(sourceSlot, destSlot, count = null, windowId = undefined) {
     const clicks = [];
-    // 1. Left-click source slot to lift stack onto cursor
     clicks.push(
       await this.sendWindowClick({ windowId, slot: sourceSlot, mouseButton: 0, mode: 0 })
     );
 
     if (count !== null && count > 0) {
-      // 2a. Deposit exact count using right-click single-item drops, then return remainder to sourceSlot
       for (let i = 0; i < count; i++) {
         clicks.push(
           await this.sendWindowClick({
@@ -437,7 +436,7 @@ class ContainerPacketController extends EventEmitter {
             slot: destSlot,
             mouseButton: 1,
             mode: 0,
-            clickedItem: { blockId: -1 }
+            cursorItem: EMPTY_SLOT_120
           })
         );
       }
@@ -447,18 +446,17 @@ class ContainerPacketController extends EventEmitter {
           slot: sourceSlot,
           mouseButton: 0,
           mode: 0,
-          clickedItem: { blockId: -1 }
+          cursorItem: EMPTY_SLOT_120
         })
       );
     } else {
-      // 2b. Full stack placement via left-click on destination slot
       clicks.push(
         await this.sendWindowClick({
           windowId,
           slot: destSlot,
           mouseButton: 0,
           mode: 0,
-          clickedItem: { blockId: -1 }
+          cursorItem: EMPTY_SLOT_120
         })
       );
     }
@@ -467,25 +465,19 @@ class ContainerPacketController extends EventEmitter {
   }
 
   /**
-   * Configures a GregTech Programmed Circuit (`gregtech:gt.integrated_circuit`, config #1..#24)
-   * inside a machine container GUI (e.g., setting Circuit #14 in an LV Bending Machine).
+   * Configures a GTCEu Modern Programmed Circuit (`gtceu:programmed_circuit`, `{ Configuration: N }`)
+   * inside a GregTech Leisure machine GUI (`#1..#32`, e.g., `#14` in `gtceu:lv_bender`).
    *
-   * Supports two GTNH modes:
-   *  - `'physical'` (classic GT5u physical Integrated Circuit item with NBT `Configuration` / damage `configNumber`,
-   *    placed into `profile.circuitSlot`).
-   *  - `'ghost'` (GTNH built-in Ghost Circuit selector button at `profile.ghostCircuitSelectorSlot`).
-   *
-   * @param {string} machineProfileId - e.g. `'gt_lv_bender'`
-   * @param {number} configNumber - Integer in [1..24], e.g. `14`
-   * @param {Object} [options]
-   * @param {'physical'|'ghost'|'auto'} [options.strategy='auto']
-   * @param {number} [options.playerCircuitSlot] - Player inventory slot index (0..35) holding the Integrated Circuit
-   * @param {number} [options.windowId]
+   * Supports two GTL modes:
+   *  - `'ghost'` (default in GTL since `gtceu.yaml` sets `ghostCircuit: true`: steps the LDLib
+   *    Ghost Circuit widget at `profile.ghostCircuitSelectorSlot`).
+   *  - `'physical'` (transfers a physical `gtceu:programmed_circuit` item with NBT `{ Configuration: N }`
+   *    into `profile.circuitSlot`).
    */
   async configureProgrammedCircuit(machineProfileId, configNumber, options = {}) {
-    if (!Number.isInteger(configNumber) || configNumber < 1 || configNumber > 24) {
+    if (!Number.isInteger(configNumber) || configNumber < 1 || configNumber > 32) {
       throw new RangeError(
-        `Invalid GregTech Programmed Circuit configuration #${configNumber}; expected integer in [1..24]`
+        `Invalid GTCEu Programmed Circuit configuration #${configNumber}; expected integer in [1..32]`
       );
     }
 
@@ -495,12 +487,11 @@ class ContainerPacketController extends EventEmitter {
     const packetsSent = [];
 
     const circuitNbt = nbt.comp({
-      Configuration: nbt.byte(configNumber)
+      Configuration: nbt.int(configNumber)
     });
 
-    // Locate physical integrated circuit in player section of container if available
     const resolvedPlayerSlot =
-      options.playerCircuitSlot ?? this._findIntegratedCircuitInWindow(profile);
+      options.playerCircuitSlot ?? this._findProgrammedCircuitInWindow(profile);
 
     if (strategy === 'physical' || (strategy === 'auto' && resolvedPlayerSlot !== null)) {
       const sourceContainerSlot =
@@ -509,24 +500,24 @@ class ContainerPacketController extends EventEmitter {
           : (profile.playerInventoryOffset ?? 8) + resolvedPlayerSlot;
       const targetCircuitSlot = profile.circuitSlot ?? 3;
       const circuitMapping = this.registryBridge.fromCanonicalItemId(
-        `gregtech:gt.integrated_circuit:${configNumber}`,
-        this.bot?.registry
+        'gtceu:programmed_circuit',
+        this.bot?.registry,
+        { nbtData: circuitNbt }
       );
       const wireCircuitItem = {
-        blockId: circuitMapping.blockId !== -1 ? circuitMapping.blockId : 7159,
+        present: true,
+        itemId: circuitMapping.itemId !== -1 ? circuitMapping.itemId : 9001,
         itemCount: 1,
-        itemDamage: configNumber,
         nbtData: circuitNbt
       };
 
-      // Pick up configured Integrated Circuit from player slot and insert into machine circuitSlot
       packetsSent.push(
         await this.sendWindowClick({
           windowId,
           slot: sourceContainerSlot,
           mouseButton: 0,
           mode: 0,
-          clickedItem: wireCircuitItem
+          cursorItem: wireCircuitItem
         })
       );
       packetsSent.push(
@@ -535,12 +526,13 @@ class ContainerPacketController extends EventEmitter {
           slot: targetCircuitSlot,
           mouseButton: 0,
           mode: 0,
-          clickedItem: { blockId: -1 }
+          cursorItem: EMPTY_SLOT_120
         })
       );
 
       return {
         mode: 'physical',
+        itemId: 'gtceu:programmed_circuit',
         machineProfileId,
         configNumber,
         targetSlot: targetCircuitSlot,
@@ -549,8 +541,7 @@ class ContainerPacketController extends EventEmitter {
       };
     }
 
-    // Ghost-circuit selector mode (GTNH built-in circuit slot):
-    // Step 1: Middle-click / double-reset ghost selector slot to clear to 0
+    // GTCEu Modern / LDLib Ghost Circuit selector (`gtceu.yaml -> ghostCircuit: true`)
     const ghostSlot = profile.ghostCircuitSelectorSlot ?? profile.circuitSlot ?? 4;
     packetsSent.push(
       await this.sendWindowClick({
@@ -558,12 +549,10 @@ class ContainerPacketController extends EventEmitter {
         slot: ghostSlot,
         mouseButton: 2,
         mode: 3,
-        clickedItem: { blockId: -1 }
+        cursorItem: EMPTY_SLOT_120
       })
     );
 
-    // Step 2: Advance selector to exact configuration #configNumber:
-    // In GTNH ghost circuit selector, Shift+Right-Click (+5) and Right-Click (+1) step up cleanly.
     const bigSteps = Math.floor(configNumber / 5);
     const singleSteps = configNumber % 5;
 
@@ -574,7 +563,7 @@ class ContainerPacketController extends EventEmitter {
           slot: ghostSlot,
           mouseButton: 1,
           mode: 1,
-          clickedItem: { blockId: -1 }
+          cursorItem: EMPTY_SLOT_120
         })
       );
     }
@@ -585,13 +574,14 @@ class ContainerPacketController extends EventEmitter {
           slot: ghostSlot,
           mouseButton: 1,
           mode: 0,
-          clickedItem: { blockId: -1 }
+          cursorItem: EMPTY_SLOT_120
         })
       );
     }
 
     return {
       mode: 'ghost',
+      itemId: 'gtceu:programmed_circuit',
       machineProfileId,
       configNumber,
       targetSlot: ghostSlot,
@@ -600,16 +590,19 @@ class ContainerPacketController extends EventEmitter {
     };
   }
 
-  _findIntegratedCircuitInWindow(profile) {
+  _findProgrammedCircuitInWindow(profile) {
     const slots = this.activeWindow?.slots || this.bot?.currentWindow?.slots;
     if (!Array.isArray(slots)) return null;
 
     const start = profile.playerInventoryOffset ?? 0;
     for (let idx = start; idx < slots.length; idx++) {
       const slotItem = slots[idx];
-      if (!slotItem) continue;
+      if (!slotItem || slotItem.present === false) continue;
       const canonical = this.registryBridge.toCanonicalItemId(slotItem) || '';
-      if (canonical.startsWith('gregtech:gt.integrated_circuit:')) {
+      if (
+        canonical === 'gtceu:programmed_circuit' ||
+        canonical.startsWith('gtceu:programmed_circuit')
+      ) {
         return idx;
       }
     }
@@ -617,11 +610,7 @@ class ContainerPacketController extends EventEmitter {
   }
 
   /**
-   * Executes a single machine crafting step at the packet level:
-   *  1. Validates hazard/power safety if a `hazardMonitor` is attached.
-   *  2. Sets Programmed Circuit configuration (e.g. #14 in Bender) if required by recipe.
-   *  3. Transfers each recipe input stack from player inventory slots into machine `inputSlots`.
-   *  4. Collects crafted items from `outputSlots` via shift-click (`mode: 1`).
+   * Executes a single machine crafting step at the 1.20.1 packet level.
    */
   async executeMachineStep(step, options = {}) {
     const profile = this.getProfile(step.machine);
@@ -681,7 +670,6 @@ class ContainerPacketController extends EventEmitter {
       await sleep(waitMs);
     }
 
-    // Re-verify power/rain did not trip mid-cycle before collecting output
     if (hazardMonitor && typeof hazardMonitor.canExecuteRecipeStep === 'function') {
       const verdict = hazardMonitor.canExecuteRecipeStep(step);
       if (!verdict.allowed) {
@@ -696,7 +684,7 @@ class ContainerPacketController extends EventEmitter {
         windowId,
         slot: outSlot,
         mouseButton: 0,
-        mode: 1 // Shift-click output directly into player inventory
+        mode: 1
       });
       actions.push({ type: 'extract_output', fromSlot: outSlot, click: extractClick });
     }
@@ -711,20 +699,12 @@ class ContainerPacketController extends EventEmitter {
 }
 
 /**
- * Graph-Based GTNH Quest & JEI Crafting Engine.
- * Structures the entire BetterQuesting Quest Book and JEI/NEI Recipe Registry as
- * Directed Acyclic Graphs (DAGs), resolves multi-tier GTNH dependency trees against
- * live inventory + warehouse chests, and queues missing component requests from
- * other subsystems (such as `MultiblockBuilder`).
+ * Graph-Based GregTech Leisure (GTL) FTB Quests & JEI/KubeJS Crafting Engine.
+ * Structures the FTB Quests progression chapters and GTCEu/GTLCore/KubeJS recipe
+ * registry as Directed Acyclic Graphs (DAGs), enforces voltage-tier and dimension
+ * constraints, and resolves multi-tier crafting plans against live bot + warehouse stock.
  */
 class CraftingEngine extends EventEmitter {
-  /**
-   * @param {Object} [options]
-   * @param {WarehouseTracker} [options.warehouse]
-   * @param {ContainerPacketController} [options.containerController]
-   * @param {ForgeRegistryBridge} [options.registryBridge]
-   * @param {string} [options.unlockedVoltageTier='LV']
-   */
   constructor(options = {}) {
     super();
     this.registryBridge = options.registryBridge || new ForgeRegistryBridge();
@@ -737,13 +717,12 @@ class CraftingEngine extends EventEmitter {
     );
 
     this.unlockedVoltageTier = options.unlockedVoltageTier || 'LV';
+    this.currentDimension = options.currentDimension || 'minecraft:overworld';
     this.availableMachines = new Set(
       options.availableMachines || ['crafting_table', 'furnace', 'gt_steam_machine']
     );
 
-    /** @type {Graph} Directed Acyclic Graph of questId -> dependent questId */
     this.questGraph = new Graph({ directed: true });
-    /** @type {Graph} Directed Acyclic Graph of ingredientItemId -> outputItemId */
     this.recipeDag = new Graph({ directed: true });
 
     this.eras = [];
@@ -751,29 +730,18 @@ class CraftingEngine extends EventEmitter {
     this.completedQuests = new Set();
 
     this.recipesById = new Map();
-    /** @type {Map<string, Array<Object>>} */
     this.recipesByOutput = new Map();
     this.prunedCyclicRecipeIds = new Set();
 
-    /** Queue of on-demand craft jobs requested by MultiblockBuilder or Quest FSM */
     this.craftQueue = [];
   }
 
-  /**
-   * Loads a GTNH Quest Book + JEI Recipe Registry JSON file from disk.
-   * @param {string} jsonFilePath
-   */
   loadDatabaseFromFile(jsonFilePath) {
     const resolved = path.resolve(jsonFilePath);
     const raw = JSON.parse(fs.readFileSync(resolved, 'utf8'));
     return this.ingestDatabase(raw);
   }
 
-  /**
-   * Ingests a structured GTNH Quest Book & JEI Recipe database into validated DAGs.
-   * Automatically detects and breaks storage compression/decompression loops so
-   * `this.recipeDag` is guaranteed to be a strict Directed Acyclic Graph.
-   */
   ingestDatabase(database) {
     if (!database || typeof database !== 'object') {
       throw new TypeError('Database payload must be a non-null JSON object');
@@ -825,7 +793,6 @@ class CraftingEngine extends EventEmitter {
       }
     }
 
-    // Break any malformed quest cycle in third-party dumps while preserving forward progression
     while (!alg.isAcyclic(this.questGraph)) {
       const cycles = alg.findCycles(this.questGraph);
       if (cycles.length === 0) break;
@@ -844,6 +811,7 @@ class CraftingEngine extends EventEmitter {
       const normalized = {
         ...rawRecipe,
         voltageTier: rawRecipe.voltageTier || 'STONE',
+        requiredDimension: rawRecipe.requiredDimension || null,
         euPerTick: rawRecipe.euPerTick ?? 0,
         durationTicks: rawRecipe.durationTicks ?? 20,
         priority: rawRecipe.priority ?? 5,
@@ -880,7 +848,6 @@ class CraftingEngine extends EventEmitter {
 
         for (const inp of normalized.inputs) {
           this.recipeDag.setNode(inp.itemId);
-          // Only add edge if adding inp -> out keeps the item production graph acyclic!
           this.recipeDag.setEdge(inp.itemId, out.itemId, { recipeId: normalized.recipeId });
           if (!alg.isAcyclic(this.recipeDag)) {
             this.recipeDag.removeEdge(inp.itemId, out.itemId);
@@ -890,7 +857,6 @@ class CraftingEngine extends EventEmitter {
       }
     }
 
-    // Remove any recipe flagged as cycle-inducing from canonical primary output selection
     for (const [outputId, list] of this.recipesByOutput.entries()) {
       const clean = list.filter((r) => !this.prunedCyclicRecipeIds.has(r.recipeId));
       if (clean.length > 0) {
@@ -899,17 +865,11 @@ class CraftingEngine extends EventEmitter {
     }
   }
 
-  /**
-   * Returns quests in valid topological execution order.
-   */
   getTopologicalQuestOrder() {
     const order = alg.topsort(this.questGraph);
     return order.map((id) => this.questsById.get(id)).filter(Boolean);
   }
 
-  /**
-   * Marks a quest complete and unlocks any Era gated behind `quest.unlocksEra`.
-   */
   markQuestCompleted(questId) {
     this.completedQuests.add(questId);
     const quest = this.questsById.get(questId);
@@ -928,13 +888,16 @@ class CraftingEngine extends EventEmitter {
     }
   }
 
+  setCurrentDimension(dimensionId) {
+    if (dimensionId) {
+      this.currentDimension = String(dimensionId);
+    }
+  }
+
   registerMachineAvailable(machineType) {
     this.availableMachines.add(machineType);
   }
 
-  /**
-   * Computes all currently unlocked & incomplete quests in the Quest Book DAG.
-   */
   getAvailableQuests() {
     const ordered = this.getTopologicalQuestOrder();
     const available = [];
@@ -962,8 +925,8 @@ class CraftingEngine extends EventEmitter {
   }
 
   /**
-   * Selects the best recipe for `itemId` given the bot's unlocked voltage tier,
-   * available machines, and current fluid stock.
+   * Selects the best GTL recipe for `itemId` given unlocked voltage tier, active dimension
+   * (e.g. `kubejs:ancient_world` gating in GTL), available machines, and fluid stock.
    */
   selectRecipeForItem(itemId, options = {}) {
     const canonical = normalizeItemId(itemId);
@@ -972,13 +935,26 @@ class CraftingEngine extends EventEmitter {
 
     const maxTier = options.maxVoltageTier || this.unlockedVoltageTier;
     const maxTierRank = VOLTAGE_TIER_ORDER[maxTier] ?? VOLTAGE_TIER_ORDER.LV;
+    const activeDimension = options.currentDimension || this.currentDimension;
     const enforceMachines = options.enforceAvailableMachines ?? false;
     const stock = options.stockMap || null;
 
-    const eligible = candidates.filter((rcp) => {
+    const dimensionAndTierFilter = (rcp) => {
       if (this.prunedCyclicRecipeIds.has(rcp.recipeId)) return false;
       const rcpRank = VOLTAGE_TIER_ORDER[rcp.voltageTier] ?? 0;
       if (rcpRank > maxTierRank) return false;
+      if (
+        rcp.requiredDimension &&
+        !options.allowCrossDimension &&
+        rcp.requiredDimension !== activeDimension
+      ) {
+        return false;
+      }
+      return true;
+    };
+
+    const eligible = candidates.filter((rcp) => {
+      if (!dimensionAndTierFilter(rcp)) return false;
       if (enforceMachines && !this.availableMachines.has(rcp.machine)) return false;
       if (rcp.fluidInputs && rcp.fluidInputs.length > 0 && stock) {
         const hasFluids = rcp.fluidInputs.every(
@@ -990,10 +966,7 @@ class CraftingEngine extends EventEmitter {
     });
 
     if (eligible.length === 0) {
-      // Fallback to lowest voltage candidate if strict filters excluded all
-      const tierFiltered = candidates.filter(
-        (rcp) => (VOLTAGE_TIER_ORDER[rcp.voltageTier] ?? 0) <= maxTierRank
-      );
+      const tierFiltered = candidates.filter(dimensionAndTierFilter);
       if (tierFiltered.length === 0) return null;
       return tierFiltered.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))[0];
     }
@@ -1009,25 +982,15 @@ class CraftingEngine extends EventEmitter {
   }
 
   /**
-   * Recursively resolves the complete GTNH production chain for `(targetItemId, quantity)`
+   * Recursively resolves the complete GTL production chain for `(targetItemId, quantity)`
    * down to raw materials, cross-referencing live bot inventory + warehouse stock,
    * reusing intermediate batch surpluses across sibling branches, and outputting a
    * topologically ordered execution plan.
-   *
-   * @param {string} targetItemId - e.g. `'gregtech:gt.metaitem.01:32700'` (LV Electronic Circuit)
-   * @param {number} [quantity=1]
-   * @param {Object} [options]
-   * @param {import('mineflayer').Bot} [options.bot]
-   * @param {Object|Map<string,number>} [options.inventoryOverride]
-   * @param {string} [options.maxVoltageTier]
-   * @param {boolean} [options.enforceAvailableMachines=false]
-   * @param {Vec3} [options.originPos]
    */
   resolveCraftingPlan(targetItemId, quantity = 1, options = {}) {
     const canonicalTarget = normalizeItemId(targetItemId);
     const requestedCount = Math.max(1, Math.ceil(Number(quantity) || 1));
 
-    // Virtual stock ledger initialized from WarehouseTracker + bot inventory + optional overrides
     const virtualStock = this.warehouse.getCombinedStock(
       options.bot || null,
       options.inventoryOverride || null
@@ -1036,7 +999,6 @@ class CraftingEngine extends EventEmitter {
 
     const rawMaterials = new Map();
     const stockConsumed = new Map();
-    /** @type {Array<Object>} */
     const orderedSteps = [];
     const activeRecursionStack = new Set();
 
@@ -1046,7 +1008,6 @@ class CraftingEngine extends EventEmitter {
       const used = Math.min(avail, needed);
       virtualStock.set(id, avail - used);
 
-      // Only attribute to `stockConsumed` up to what originally existed in inventory/warehouse
       const origAvail = initialStockSnapshot.get(id) || 0;
       const prevConsumed = stockConsumed.get(id) || 0;
       const fromInitial = Math.max(0, Math.min(used, origAvail - prevConsumed));
@@ -1060,7 +1021,6 @@ class CraftingEngine extends EventEmitter {
       let remaining = neededCount;
       let satisfiedFromStock = 0;
 
-      // Root target can optionally force fresh crafting or use stock (default: deduct existing stock)
       if (!isRoot || options.deductTargetFromStock !== false) {
         satisfiedFromStock = consumeFromVirtualStock(itemId, remaining);
         remaining -= satisfiedFromStock;
@@ -1082,7 +1042,6 @@ class CraftingEngine extends EventEmitter {
       }
 
       if (activeRecursionStack.has(itemId)) {
-        // Cycle guard fallback: treat as raw external requirement
         rawMaterials.set(itemId, (rawMaterials.get(itemId) || 0) + remaining);
         node.isRawMaterial = true;
         return node;
@@ -1090,6 +1049,8 @@ class CraftingEngine extends EventEmitter {
 
       const recipe = this.selectRecipeForItem(itemId, {
         maxVoltageTier: options.maxVoltageTier || this.unlockedVoltageTier,
+        currentDimension: options.currentDimension || this.currentDimension,
+        allowCrossDimension: options.allowCrossDimension ?? false,
         enforceAvailableMachines: options.enforceAvailableMachines ?? false,
         stockMap: virtualStock,
         allowMissingFluids: options.allowMissingFluids ?? false
@@ -1114,7 +1075,6 @@ class CraftingEngine extends EventEmitter {
 
       activeRecursionStack.add(itemId);
 
-      // Resolve all item inputs first (post-order DFS guarantees topological order!)
       const stepInputs = [];
       for (const inp of recipe.inputs) {
         const totalInputNeeded = inp.count * batches;
@@ -1123,7 +1083,6 @@ class CraftingEngine extends EventEmitter {
         node.children.push(childNode);
       }
 
-      // Resolve fluid inputs
       const stepFluids = [];
       for (const fl of recipe.fluidInputs || []) {
         const totalMbNeeded = fl.amountMb * batches;
@@ -1137,7 +1096,6 @@ class CraftingEngine extends EventEmitter {
 
       activeRecursionStack.delete(itemId);
 
-      // Credit surplus & secondary byproducts into virtualStock for downstream sibling branches!
       if (surplus > 0) {
         virtualStock.set(itemId, (virtualStock.get(itemId) || 0) + surplus);
       }
@@ -1154,6 +1112,7 @@ class CraftingEngine extends EventEmitter {
         machine: recipe.machine,
         subMachine: recipe.subMachine || null,
         voltageTier: recipe.voltageTier,
+        requiredDimension: recipe.requiredDimension || null,
         euPerTick: recipe.euPerTick,
         durationTicks: recipe.durationTicks * batches,
         totalEu: recipe.euPerTick * recipe.durationTicks * batches,
@@ -1173,11 +1132,8 @@ class CraftingEngine extends EventEmitter {
     };
 
     const dependencyTree = resolveNode(canonicalTarget, requestedCount, true);
-
-    // Consolidate identical consecutive or parallelizable steps while preserving topological validity
     const mergedSteps = consolidateStepsTopological(orderedSteps);
 
-    // Resolve concrete warehouse withdrawal coordinates for all stockConsumed items
     const warehouseWithdrawals = [];
     for (const [itemId, count] of stockConsumed.entries()) {
       const sourcePlan = this.warehouse.locateItemSources(
@@ -1195,6 +1151,7 @@ class CraftingEngine extends EventEmitter {
       targetItemId: canonicalTarget,
       requestedCount,
       unlockedVoltageTier: options.maxVoltageTier || this.unlockedVoltageTier,
+      currentDimension: options.currentDimension || this.currentDimension,
       dependencyTree,
       rawMaterials: Object.fromEntries(rawMaterials),
       warehouseWithdrawals,
@@ -1204,10 +1161,6 @@ class CraftingEngine extends EventEmitter {
     };
   }
 
-  /**
-   * Queues an on-demand craft request (e.g. invoked by `MultiblockBuilder` when a casing,
-   * controller, or specialized hatch is missing during layout execution).
-   */
   requestCraft(itemId, quantity = 1, requesterMeta = {}) {
     const plan = this.resolveCraftingPlan(itemId, quantity, requesterMeta.planOptions || {});
     const job = {
@@ -1225,10 +1178,6 @@ class CraftingEngine extends EventEmitter {
   }
 }
 
-/**
- * Merges duplicate recipe invocations that share the same `recipeId` when doing so
- * preserves strict topological ordering (all inputs produced before consumer step).
- */
 function consolidateStepsTopological(steps) {
   const result = [];
   const indexByRecipe = new Map();
@@ -1248,7 +1197,6 @@ function consolidateStepsTopological(steps) {
     }
 
     const existingIdx = indexByRecipe.get(step.recipeId);
-    // Check if any step AFTER existingIdx produces an input required by `step`
     const requiredIds = new Set(step.inputs.map((i) => i.itemId));
     let canMergeAtExisting = true;
     for (let k = existingIdx + 1; k < result.length; k++) {
@@ -1305,6 +1253,7 @@ function sleep(ms) {
 
 module.exports = {
   VOLTAGE_TIER_ORDER,
+  EMPTY_SLOT_120,
   WarehouseTracker,
   ContainerPacketController,
   CraftingEngine

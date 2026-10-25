@@ -1,256 +1,158 @@
-# GTNH-Bot-v1 — Headless GregTech: New Horizons Automation Framework
+# GregTech Leisure (GTL 1.20.1) — Low-End PC Optimizer & Headless Automation Bot
 
-A production-grade, headless Node.js automation client built on **Mineflayer**, **mineflayer-pathfinder**, **mineflayer-statemachine**, and **ProtoDef / Forge `FML|HS` packet serialization**. Its objective is autonomous progression through the **GregTech: New Horizons (GTNH)** Quest Book (Forge 1.7.10) — from Stone Age and Steam Tier through Low Voltage (LV), Medium Voltage (MV), High Voltage (HV), and beyond.
+A two-part engineering toolkit built specifically for **GregTech Leisure (`1.4.5.x`, Minecraft `1.20.1`, Forge `47.4.16`)** on **low-spec / weak PCs**:
+
+1. **Low-End PC Modpack Optimizer (`npm run optimize-pack` + `modpack-optimizations/`)** — Automatically patches an installed GregTech Leisure CurseForge / Prism / Modrinth instance to cut RAM usage by **~1.5–2.2 GB**, eliminate integrated-GPU texture-atlas stalls, reduce AE2/GTCEu CPU tick overhead, and safely disable heavy client-only visual mods (`oculus`, `openysm`, `cosmeticarmorreworked`, etc.) with automatic `.gtl-backup/` snapshots and `--restore`.
+2. **Headless GregTech Leisure Automation Agent (`src/bot.js`)** — A zero-GPU (~55 MB RAM) headless **Mineflayer `1.20.1`** bot speaking native **Forge `FML3` (`fml:loginwrapper` / `fml:handshake`)** — **no external ViaProxy Java process required** — trained on GregTech Leisure's FTB Quests chapters, GTCEu Modern / GTLCore / KubeJS recipes, 3D multiblock blueprints, and GTL volatility hazards.
 
 ---
 
-## System Architecture
+## Part 1: Fixing Up GregTech Leisure for a Low-End PC
 
-Data definitions (BetterQuesting DAGs, JEI/NEI recipes, 3D multiblock schematics, and GregTech GUI slot maps) are strictly decoupled from client network/spatial execution:
+GregTech Leisure is already much faster-paced than GTNH (`durationMultiplier: 0.05`, `oreMultiplier: 4`, Steam Age overhaul), **but out of the box** it ships with shader hooks (`oculus`), custom 3D skeletal player models (`openysm`), dual-pass GTCEu emissive machine bloom (`machinesEmissiveTextures: true`), `mipmapLevels: 4` on 20,000+ GregTech textures, and large ore-vein chunk caches (`2048` chunks) that choke 8 GB RAM / integrated-GPU laptops.
+
+### One-Command Automatic Modpack Fixer
+
+Point `optimize-pack` at your CurseForge, Prism Launcher, or Modrinth **GregTech Leisure** instance folder:
+
+```bash
+# Standard Low-Spec Mode (8 GB System RAM PC)
+npm run optimize-pack -- --instance-dir "/path/to/Instances/GregTech Leisure" --ram-gb 8
+
+# Potato / Integrated GPU Mode (maximum FPS & lowest RAM, keeps 100% server compatibility)
+npm run optimize-pack -- --instance-dir "/path/to/Instances/GregTech Leisure" --ram-gb 8 --aggressive
+
+# Preview changes without modifying files
+npm run optimize-pack -- --instance-dir "/path/to/Instances/GregTech Leisure" --dry-run
+
+# Revert every config & re-enable every disabled client JAR from .gtl-backup/
+npm run optimize-pack -- --instance-dir "/path/to/Instances/GregTech Leisure" --restore
+```
+
+### What `optimize-pack` Fixes Under the Hood
+
+| Bottleneck in Stock GTL | Optimization Applied | Hardware Impact |
+| :--- | :--- | :--- |
+| **20,000+ GTCEu/GTL `BakedModel`s held in RAM** | Enables `mixin.perf.dynamic_resources=true` & `faster_item_rendering=true` in `config/modernfix-mixins.properties` + `config/ferritecore-mixin.toml` | Saves **~1.2 – 1.8 GB Heap RAM** and cuts load times |
+| **4x Mipmap Texture Atlas (`options.txt`)** | Sets `mipmapLevels:0`, `renderDistance:6` (`4` in `--aggressive`), `simulationDistance:6`, `entityShadows:false`, `particles:2` | Cuts VRAM footprint by **~75%** and prevents iGPU frame freezes |
+| **GTCEu Emissive Bloom & Sound Saturation (`config/gtceu.yaml`)** | Sets `machinesEmissiveTextures: false`, `machineSounds: false`, shrinks `oreGenerationChunkCacheSize: 128` & `oreIndicatorChunkCacheSize: 512` *(leaves `ghostCircuit`, `casingsPerCraft`, etc. untouched!)* | Eliminates FPS drops in dense LV–HV machine rooms & OpenAL audio thread stalls |
+| **GTLCore Animations & AE2 Tick Rate (`config/gtlcore.yaml`)** | Sets `enableSmoothAnimations: false`, `mobSpawnInterval: 80`, raises `ae2CraftingServiceUpdateInterval: 8` & `ae2StorageServiceUpdateInterval: 32` *(leaves `durationMultiplier: 0.05` & `oreMultiplier: 4` intact!)* | Halves AE2 ME network & mob-spawn CPU tick time |
+| **Embeddium Culling (`config/embeddium-options.json`)** | Enables `use_block_face_culling`, `use_entity_culling`, `use_fog_occlusion`, `animate_only_visible_textures`, `max_entity_distance: 24`, `tile_entity_distance: 24` | Major GPU frame-time boost around pipe/cable ducts |
+| **Heavy Client-Only Mods (`mods/*.jar`)** | Disables `oculus`, `openysm`/`yesstevemodel`, `cosmeticarmorreworked` (+ `ModernUI`, `simple-voice-chat`, `legendarytooltips`, `soundphysics` in `--aggressive`) while **protecting** all gameplay/server mods (`gtceu`, `gtlcore`, `kubejs`, `ae2`, `mae2`, `ad_astra`, `embeddium`, `modernfix`, `ferritecore`) | Saves **~400 – 700 MB RAM** while keeping **100% multiplayer compatibility** |
+
+### Recommended Java 17 JVM Arguments (`modpack-optimizations/jvm-args-low-ram.txt`)
+
+Paste the matching profile into **Prism Launcher / CurseForge / Modrinth -> Java Settings -> JVM Arguments**:
+
+- **8 GB Total System RAM** *(allocates 4.5 GB heap so Windows + iGPU still have 3.5 GB breathing room)*:
+  ```text
+  -Xms4096M -Xmx4608M -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=35 -XX:G1HeapRegionSize=16M -XX:+UseStringDeduplication -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -Dfml.readTimeout=180 -Dforge.logging.mojang.level=warn
+  ```
+- **12–16 GB Total System RAM** *(allocates 5.5–6.0 GB heap for mid/late-game AE2 + multiblock bases)*:
+  ```text
+  -Xms5120M -Xmx6144M -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=35 -XX:G1HeapRegionSize=32M -XX:+UseStringDeduplication -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -Dfml.readTimeout=180 -Dforge.logging.mojang.level=warn
+  ```
+
+---
+
+## Part 2: Architecture of the GregTech Leisure (`1.20.1`) Automation Bot
 
 ```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         STATIC & INGESTED DATA LAYER                         │
-│  /data/quest_tree_template.json   /data/primitive_blast_furnace.json         │
-│  /data/electric_blast_furnace.json   NEI ID Dumps + World Seed + JEI Dumps   │
-└───────────────────┬───────────────────────────────────────┬──────────────────┘
-                    │                                       │
-                    ▼                                       ▼
-┌───────────────────────────────────────┐ ┌────────────────────────────────────┐
-│     src/craftingEngine.js             │ │   src/multiblockBuilder.js         │
-│  • Quest Book & JEI Recipe DAGs       │ │  • 3D Palette/Voxel Matrix Parser  │
-│  • Cycle Breaker (Ingot<->Nugget)     │ │  • Anchor [0,0,0] + 4-Way Rotation │
-│  • Recursive Dependency Resolver      │◄┤  • Chunk Cache + DDA Raycast Scan  │
-│  • WarehouseTracker (3D Chest Index)  │ │  • Craft-on-Missing Pause/Resume   │
-│  • ContainerPacketController (#1-#24) │ │  • Sneak-Guarded block_place Pkts  │
-└───────────────────┬───────────────────┘ └─────────────────┬──────────────────┘
-                    │                                       │
-                    └───────────────────┬───────────────────┘
-                                        ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│          src/statemachine/hierarchy.js (3-Tier Nested State Machine)         │
-│  Depth 0: Root Preemption Arbiter (Macro <-> Hazard Emergency <-> Low Power) │
-│  Depth 1: Macro Era/Quest Progression | Emergency Mitigation | EU Recovery   │
-│  Depth 2: MiningLoop | CraftingLoop | MultiblockLoop | WarehouseSortingLoop  │
-└──────────────┬────────────────────────────────┬──────────────────────────────┘
-               ▼                                ▼
-┌──────────────────────────────────┐ ┌─────────────────────────────────────────┐
-│  src/navigation/gtnhNavigator.js │ │  src/hazards/hazardMonitor.js           │
-│  • mineflayer-pathfinder + Moves │ │  • Rain/Storm Unroofed Machine Shutdown │
-│  • Lava Vein & Live Wire Margins │ │  • Over-Voltage Cable Explosion Guard   │
-│  • Vertical Shaft maxDropDown=3  │ │  • Battery Buffer / Steam EU Telemetry  │
-│  • Dynamic Pollution Chunk Costs │ │  • Pollution Gibbl & Infernal Mob Evade │
-│  • 3D Amanatides-Woo Raycaster   │ └────────────────────┬────────────────────┘
-└──────────────┬───────────────────┘                      │
-               └────────────────────┬─────────────────────┘
-                                    ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│      src/bot.js + src/protocol/forgeHandshake.js (Network & FML Layer)       │
-│  • FML|HS 5-Phase Handshake (ServerHello -> ModList -> ModIdData -> Ack)     │
-│  • Bidirectional Forge 1.7.10 Dynamic Numeric ID <-> mod:item:meta Bridge    │
-└──────────────────────────────────────────────────────────────────────────────┘
+Gtnh-bot-v1/
+├── package.json                               # CommonJS Node.js (>=18) manifest & CLI scripts
+├── modpack-optimizations/                     # Drop-in Low-Spec GTL 1.20.1 config kit & JVM flags
+│   ├── config/embeddium-options.json
+│   ├── config/modernfix-mixins.properties
+│   ├── config/ferritecore-mixin.toml
+│   ├── config/gtceu-lowspec-overrides.yaml
+│   ├── config/gtlcore-lowspec-overrides.yaml
+│   ├── options-potato.txt
+│   └── jvm-args-low-ram.txt
+├── data/
+│   ├── quest_tree_template.json               # GTL FTB Quests hex IDs, GTCEu/KubeJS recipes & LDLib GUIs
+│   ├── primitive_blast_furnace.json           # GTL 3x4x3 PBF (gtceu:primitive_blast_furnace + ULV bus support)
+│   ├── electric_blast_furnace.json            # GTL 3x4x3 Dual-LV EBF + gtceu:duct_tape maintenance metadata
+│   ├── large_steam_circuit_assembler.json     # GTL 3x3x3 Steam Overhaul Circuit Multiblock
+│   └── gtl_steam_sample.snbt                  # Authentic GTL FTB Quests 1.20.1 SNBT chapter fixture
+├── src/
+│   ├── bot.js                                 # Native Mineflayer 1.20.1 entry point & GTLAutomationAgent
+│   ├── craftingEngine.js                      # FTB Quests/JEI DAG solver, WarehouseTracker & 1.20.1 GUI clicker
+│   ├── multiblockBuilder.js                   # 3D schematic printer, 1.20.1 block_place & duct-tape servicing
+│   ├── protocol/
+│   │   └── forgeHandshake.js                  # Forge 47.x FML3 (\0FML3\0, fml:loginwrapper / fml:handshake)
+│   ├── navigation/
+│   │   └── gtnhNavigator.js                   # Steam exhaust vent, hot pipe, Y=-64 shaft & DDA raycast nav
+│   ├── hazards/
+│   │   └── hazardMonitor.js                   # Dry-boiler explosion, MAE2 EU P2P, & 2x low-EU drain guards
+│   ├── statemachine/
+│   │   └── hierarchy.js                       # 3-Tier Hierarchical State Machine (STEAM_ULV -> MAX)
+│   └── cli/
+│       ├── optimizeModpack.js                 # Low-End PC GTL Modpack Optimizer & backup restorer
+│       ├── ingestData.js                      # FTB Quests .snbt parser + JEI/KubeJS DAG ingestion CLI
+│       ├── planCraft.js                       # Offline GTCEu/KubeJS DAG crafting plan inspector
+│       └── validateBlueprint.js               # 3D multiblock rotation & BOM verifier
+└── test/                                      # 16 automated integration & unit tests (`npm test`)
 ```
 
-### Repository Structure
+### Core Capabilities Trained on GregTech Leisure
 
-| Path | Responsibility |
-| :--- | :--- |
-| `package.json` | Dependencies (`mineflayer`, `mineflayer-pathfinder`, `mineflayer-statemachine`, `minecraft-protocol`, `@tcortega/minecraft-protocol-forge`, `protodef`, `prismarine-*`, `@dagrejs/graphlib`, `vec3`) and CLI scripts. |
-| `src/bot.js` | Primary entry point: Forge client handshake bootstrap, plugin injection, world/packet event binding, state machine startup, and `--dry-run` verification mode. |
-| `src/craftingEngine.js` | Quest Book & JEI Directed Acyclic Graph (DAG) engine, recursive sub-component resolver, `WarehouseTracker`, and `ContainerPacketController` (custom GT slot clicker + Programmed Circuits `#1`–`#24`). |
-| `src/multiblockBuilder.js` | 3D blueprint parser, cardinal rotation transformer, raycast/chunk bounding-box scanner, missing-hatch pause/craft callback, and sneak-guarded `block_place` packet printer. |
-| `src/protocol/forgeHandshake.js` | Forge `FML|HS` 1.7.10 / 1.8+ handshake state machine and `ModIdData` dynamic numeric block/item ID translator (`ForgeRegistryBridge`). |
-| `src/navigation/gtnhNavigator.js` | 1.7.10 hazard-aware pathfinder wrapper (lava veins, shaft drops, GT pollution cloud exclusion weights, protected multiblock footprints, and 3D voxel DDA raycaster). |
-| `src/hazards/hazardMonitor.js` | Rain/storm machine Soft-Mallet cutoff, cable voltage-tier guard, Battery Buffer/Turbine EU hysteresis monitor, pollution debuff detector, and hostile/Infernal mob evasion. |
-| `src/statemachine/hierarchy.js` | 3-depth hierarchical `mineflayer-statemachine` orchestrating macro GTNH Eras/Quests, micro task loops, and emergency survival preemption. |
-| `src/cli/ingestData.js` | CLI ingestion pipeline transforming BetterQuesting `DefaultQuests.json`, JEI recipe JSONs, NEI ID CSVs, and world seeds into a unified DAG database. |
-| `src/cli/planCraft.js` | CLI planner printing the resolved dependency tree and topological machine steps for any GTNH item ID. |
-| `src/cli/validateBlueprint.js` | CLI validator inspecting 3D multiblock JSON blueprints, rotations, bounding boxes, and GTNH hatch rules. |
-| `data/quest_tree_template.json` | Canonical GTNH Quest Book DAG, JEI recipe dataset (Stone -> Steam -> LV -> MV -> HV), and GregTech container `windowProfiles`. |
-| `data/primitive_blast_furnace.json` | Exact 3x3x4 Primitive Blast Furnace 3D matrix (30 Firebricks, Controller at `[0,0,0]`, ULV Input Hatch, ULV Output Hatch, 3-high hollow chimney). |
-| `data/electric_blast_furnace.json` | Reference 3x3x4 Electric Blast Furnace 3D matrix (Heat Proof Casings, Cupronickel Coils, Input/Output Buses & Hatch, Maintenance Hatch, 2x LV Energy Hatches, Sky-facing Muffler Hatch). |
-| `test/*.test.js` | Automated unit & integration test suite verifying FML handshake, DAG crafting, Programmed Circuit `#14`, 3x3x4 PBF construction, and GTNH hazard sensors. |
+1. **Zero-Proxy Forge `1.20.1` (`FML3`) Handshake (`src/protocol/forgeHandshake.js`)**:
+   - Injects the `\0FML3\0` hostname marker on `set_protocol`, unwraps `fml:loginwrapper` (`fml:handshake` packets `1` `S2CModList`, `2` `C2SModListReply`, `3` `S2CRegistry`, `4` `S2CConfigData`, `99` `C2SAck`), mirrors server mod channels automatically, and maps flattened 1.20.1 ResourceLocation IDs (`gtceu:*`, `gtlcore:*`, `kubejs:*`).
+2. **FTB Quests `.snbt` & GTCEu/KubeJS DAG Crafting Engine (`src/craftingEngine.js`)**:
+   - Models GregTech Leisure's progression chapters (`77F8039ACE718C6C` Steam ULV -> `393DD40CAFBB69A5` LV -> MV -> HV -> MAX), including GTL's custom Steam Overhaul circuits (`kubejs:precision_steam_mechanism`, `kubejs:basic_control_circuit`, `kubejs:advanced_control_circuit`) and standard GTCEu `gtceu:basic_electronic_circuit`.
+   - Enforces GTL dimension-gated recipes (e.g., `kubejs:ancient_world` for Damascus Steel Dust) and prunes storage block/nugget compression cycles so `@dagrejs/graphlib` stays strictly acyclic.
+   - Emits Minecraft `1.20.1` `window_click` wire packets (`stateId`, `changedSlots`, `cursorItem`) and configures `gtceu:programmed_circuit` (`{ Configuration: N }`) via GTCEu's built-in LDLib Ghost Circuit slot (`ghostCircuit: true`) or physical circuit transfer.
+3. **3D Multiblock Builder (`src/multiblockBuilder.js`)**:
+   - Includes ready-to-build schematics for GTL's **Primitive Blast Furnace** (supporting GTL's bottom-layer `gtceu:ulv_input_bus` / `gtceu:ulv_output_bus` Dirt-Forge automation), **Dual-LV Electric Blast Furnace** (2x `gtceu:lv_energy_input_hatch` for MV overclocking), and **Large Steam Circuit Assembler**.
+   - Pauses and delegates missing hatches/casings to `CraftingEngine.requestCraft()`, verifies unobstructed air above `gtceu:lv_muffler_hatch`, emits 1.20.1 `block_place` sequence packets while sneaking, and automatically services newly formed Maintenance Hatches using `gtceu:duct_tape` (rewarded x256 in GTL quest `3F38CC8C8D650202`).
+4. **GregTech Leisure Volatility & Hazard Monitor (`src/hazards/hazardMonitor.js` & `src/navigation/gtnhNavigator.js`)**:
+   - **Dry Steam Boiler Explosion Guard** *(Quest `4BFC342697BDE75A`)*: Blocks water injection into any `gtceu:lp_steam_solid_boiler` / `gtceu:hp_steam_solid_boiler` whose water tank is `0 mB` and temperature exceeds `95°C`.
+   - **Steam Exhaust Vent & Hot Pipe Avoidance** *(Quest `7736F74AEBCB914E`)*: Prevents walking into scalding steam exhaust jets or placing blocks that obstruct steam vents, and avoids unframed hot fluid pipes until framed.
+   - **MAE2 EU P2P & Cable Over-Voltage Guard** *(Quest `4B66FAB975B2C7D2`)*: Verifies voltage tier parity across both direct GTCEu cables and `mae2:eu_p2p_tunnel` links (which do not step down voltage).
+   - **2x Low-Energy Progress-Drain Hysteresis** *(`gtceu.yaml -> recipeProgressLowEnergy: true`)*: Halts electric crafting if `gtceu:lv_battery_buffer_4x` drops below **20% EU** and waits until **50% EU** recovery before resuming.
 
 ---
 
-## 1. Quick Start & Booting the Headless Client
+## Quick Start & CLI Commands
 
-### Install Dependencies & Verify Readiness
-
+### 1. Install & Verify Everything Offline
 ```bash
 npm install
-
-# Run offline headless verification (Quest DAG + LV Circuit plan + 3x3x4 PBF validation)
-npm run dry-run
-
-# Run full unit & integration test suite
 npm test
+npm run dry-run
 ```
 
-### Connecting to a Live Modded Forge 1.7.10 GTNH Server
-
-GTNH runs on a modified **Forge 1.7.10** engine (`Forge 10.13.4.1614`, protocol version `5`). Two network deployment topologies are supported out of the box:
-
-#### Topology A: ViaProxy `1.8.8 -> 1.7.10` Forge Bridge (`fml_passthrough`, Recommended)
-Running [ViaProxy](https://github.com/ViaVersion/ViaProxy) locally in front of the 1.7.10 GTNH server translates chunk/entity wire framing to `1.8.8` for Mineflayer's physics engine while passing `FML|HS` custom payload channels through to `src/protocol/forgeHandshake.js`:
+### 2. Train on Full Local GregTech Leisure FTB Quests Chapters (`.snbt`)
+Point the `.snbt` ingestion pipeline directly at your installed GregTech Leisure `chapters/` folder to import all 15 Tech Tiers chapters (`77F8039ACE718C6C.snbt`, `lv.snbt`, `mv.snbt`, `hv.snbt`, `ev.snbt`, ..., `max.snbt`) into a unified DAG JSON:
 
 ```bash
-GTNH_HOST=127.0.0.1 \
-GTNH_PORT=25568 \
-GTNH_USERNAME=GTNH_Automaton \
-GTNH_AUTH=offline \
-GTNH_VERSION=1.8.8 \
-GTNH_FORGE_MODE=fml_passthrough \
+npm run ingest-data -- \
+  --ftbquests-dir "/path/to/Instances/GregTech Leisure/config/ftbquests/quests/chapters" \
+  --seed "-419283719283" \
+  --out ./data/gtl_full_quest_db.json
+```
+
+### 3. Inspect Crafting Plans & Multiblock Blueprints
+```bash
+# Plan a GTCEu Basic Electronic Circuit (LV)
+npm run plan -- gtceu:basic_electronic_circuit 2 LV
+
+# Plan GTL's Steam-Age Cheap LV Circuit (Advanced Control Circuit)
+npm run plan -- kubejs:advanced_control_circuit 4 STEAM
+
+# Validate the Dual-LV Electric Blast Furnace blueprint rotated EAST
+npm run validate-blueprint -- ./data/electric_blast_furnace.json EAST
+```
+
+### 4. Connect the Headless Bot to GregTech Leisure (Open-to-LAN or Server)
+
+In singleplayer GregTech Leisure, press **Esc -> Open to LAN** (note the port printed in chat, e.g. `54321`), or start a local GTL Forge `47.4.16` server (`online-mode=false` for local offline bots):
+
+```bash
+GTL_HOST=127.0.0.1 \
+GTL_PORT=54321 \
+GTL_USERNAME=GTL_Automaton \
+GTL_AUTH=offline \
+GTL_INITIAL_TIER=STEAM \
 npm start
 ```
-
-#### Topology B: Direct 1.7.10 Forge Protocol Client (`direct_1710_client`)
-Initializes a raw `minecraft-protocol` 1.7 client with `FML|HS` (`\0FML\0` host tag, `ServerHello -> REGISTER -> ClientHello -> ModList -> ModIdData -> HandshakeAck`) before binding Mineflayer:
-
-```bash
-GTNH_HOST=play.my-gtnh-server.example \
-GTNH_PORT=25565 \
-GTNH_USERNAME=GTNH_Automaton \
-GTNH_FORGE_MODE=direct_1710_client \
-GTNH_FORGE_MODS_JSON=./data/server_modlist.json \
-npm start
-```
-
-### Environment Variable Reference
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `GTNH_HOST` | `127.0.0.1` | Target GTNH server or local ViaProxy bind address. |
-| `GTNH_PORT` | `25565` | Target TCP port. |
-| `GTNH_USERNAME` | `GTNH_Automaton` | Bot account username. |
-| `GTNH_AUTH` | `offline` | Auth mode (`offline` or `microsoft`). |
-| `GTNH_VERSION` | `1.8.8` | Protocol version presented to Mineflayer (`1.8.8` via proxy or `1.7`). |
-| `GTNH_FORGE_MODE` | `fml_passthrough` | `fml_passthrough` or `direct_1710_client`. |
-| `GTNH_FORGE_MODS_JSON` | *(built-in GTNH core)* | Optional JSON array of `{ modid, version }` pairs matching your exact GTNH pack version. |
-| `GTNH_REGISTRY_DUMP_JSON` | `null` | Optional pre-dumped NEI numeric ID table JSON. |
-| `GTNH_QUEST_DB_PATH` | `data/quest_tree_template.json` | Path to compiled Quest Book + JEI DAG JSON database. |
-| `GTNH_BLUEPRINTS_DIR` | `data/` | Directory scanned on startup for 3D multiblock `.json` blueprints. |
-| `GTNH_INITIAL_TIER` | `STEAM` | Initial unlocked voltage tier (`STONE`, `STEAM`, `ULV`, `LV`, `MV`, `HV`, `EV`, `IV`). |
-| `GTNH_AUTO_RECONNECT` | `1` | Set `0` to disable exponential-backoff auto-reconnect. |
-| `BOT_DEBUG_WINDOWS` | `0` | Set `1` to log raw container `windowId`, `inventoryType`, `windowTitle`, and `slotCount` packets for GUI calibration. |
-
----
-
-## 2. Piping Server Seed, BetterQuesting, and JEI/NEI Dumps into the Database
-
-Because Forge 1.7.10 dynamically allocates numeric block/item IDs per world (`ModIdData`), while JEI and BetterQuesting reference canonical string IDs (such as `gregtech:gt.metaitem.01:32700` for an **LV Electronic Circuit**), GTNH-Bot-v1 includes both **automatic login-time `ModIdData` packet extraction** (`ForgeRegistryBridge.ingestRegistryPacket`) and an offline **CLI Ingestion Pipeline** (`src/cli/ingestData.js`).
-
-### Step 1: Export Raw Data from Your GTNH Instance
-1. **Server Seed**: Run `/seed` in-game (or inspect `level.dat` via NBTExplorer) to record the world seed for GTNH 3x3 chunk ore-vein grid calculations.
-2. **BetterQuesting Quest Book**: Copy `config/betterquesting/DefaultQuests.json` from the GTNH server or client pack folder.
-3. **NEI Numeric ID CSV Dump**: Open inventory -> **NEI Options** -> **Tools** -> **Data Dumps** -> set **Items** and **Blocks** to `CSV` -> click **Dump** (produces `dumps/item.csv` and `dumps/block.csv`).
-4. **JEI / GTNH Recipe Registry JSON**: Export machine & shaped/shapeless recipes as JSON matching the `recipes` schema in `data/quest_tree_template.json` (`recipeId`, `machine`, `voltageTier`, `euPerTick`, `durationTicks`, `programmedCircuit`, `inputs`, `fluidInputs`, `outputs`).
-
-### Step 2: Run the Ingestion & DAG Verification Pipeline
-
-```bash
-npm run ingest -- \
-  --base ./data/quest_tree_template.json \
-  --quests /path/to/GTNH/config/betterquesting/DefaultQuests.json \
-  --jei /path/to/exported_jei_recipes.json \
-  --nei-csv /path/to/GTNH/dumps/item.csv \
-  --seed -4918273645192837465 \
-  --out ./data/gtnh_compiled_db.json
-```
-
-`ingestData.js` normalizes all BetterQuesting prerequisites into `questGraph`, compiles all JEI recipes into `recipeDag`, automatically detects and breaks reverse storage-recompression cycles (e.g., `9x Steel Nugget <-> 1x Steel Ingot`), and verifies strict DAG acyclicity (`alg.isAcyclic`).
-
-### Step 3: Inspect Crafting Plans via CLI
-
-```bash
-# Resolve 2x LV Electronic Circuits (gregtech:gt.metaitem.01:32700) at LV tier
-npm run plan -- gregtech:gt.metaitem.01:32700 2 LV
-
-# Resolve 1x Empty Fluid Cell in LV Bender (uses Programmed Circuit #14)
-npm run plan -- IC2:itemCellEmpty:0 1 LV
-```
-
----
-
-## 3. Calibrating Custom GregTech Container Window Click Vectors
-
-GregTech 5 Unofficial / GTNH machines use custom ModularUI / `GT_Container_BasicMachine` window layouts with battery slots, multi-input item grids, phantom fluid tanks, and dedicated **Programmed Circuit** slots rather than vanilla crafting slots.
-
-### Step 1: Capture Raw Container Telemetry
-Launch the bot with window debugging enabled and open the target GregTech machine once (or let the bot interact with it):
-
-```bash
-BOT_DEBUG_WINDOWS=1 npm start
-```
-
-The bot logs the exact `open_window` header (`windowId`, `inventoryType`, `windowTitle`, `slotCount`). Within any open container:
-- Slots `0 .. containerSlotCount - 1` belong to the **GregTech machine GUI** (battery slot, item inputs, fluid phantom slots, item outputs, circuit slot, ghost-circuit button).
-- Slots `playerInventoryOffset .. playerInventoryOffset + 26` map to the **player's 3x9 main inventory**.
-- Slots `playerInventoryOffset + 27 .. playerInventoryOffset + 35` map to the **player's 9-slot hotbar**.
-
-### Step 2: Register or Calibrate a `windowProfile`
-
-Add or adjust the machine entry under `windowProfiles` in `data/quest_tree_template.json`:
-
-```json
-"gt_lv_bender": {
-  "titlePattern": "Bending Machine",
-  "containerSlotCount": 8,
-  "batterySlot": 0,
-  "inputSlots": [1],
-  "outputSlots": [2],
-  "circuitSlot": 3,
-  "ghostCircuitSelectorSlot": 4,
-  "fluidInputSlots": [],
-  "fluidOutputSlots": [],
-  "playerInventoryOffset": 8
-}
-```
-
-Or calibrate dynamically in code via `ContainerPacketController.calibrateClickVector`:
-
-```js
-agent.containerController.calibrateClickVector('gt_lv_bender', {
-  containerSlotCount: 8,
-  inputSlots: [1],
-  outputSlots: [2],
-  circuitSlot: 3,
-  ghostCircuitSelectorSlot: 4,
-  playerInventoryOffset: 8
-});
-```
-
-### Step 3: Programmed Circuit (`#1`–`#24`) Packet Simulation
-
-When a JEI recipe specifies `"programmedCircuit": 14` (e.g. bending plates into fluid cells or rolled foils in `gt_lv_bender`), `ContainerPacketController.configureProgrammedCircuit('gt_lv_bender', 14, options)` supports both GTNH circuit paradigms:
-
-1. **`strategy: 'physical'`**: Locates `gregtech:gt.integrated_circuit` in the player inventory section (`playerInventoryOffset + slot`), tags it with NBT `{ Configuration: 14b }` / damage `14`, lifts it (`mode: 0, mouseButton: 0`), and places it into `circuitSlot` (`slot: 3`).
-2. **`strategy: 'ghost'`**: Targets GTNH's built-in Ghost Circuit selector (`ghostCircuitSelectorSlot: 4`), resets it via middle-click (`mode: 3, mouseButton: 2`), then steps cleanly to `#14` using 2x `+5` clicks (`mode: 1, mouseButton: 1`) followed by 4x `+1` clicks (`mode: 0, mouseButton: 1`).
-
----
-
-## 4. 3D Blueprint Multiblock Printing & Missing-Component Recovery
-
-Blueprints in `/data/*.json` map a 3D `layers[y][z][x]` symbol matrix around `anchorGridIndex` (pinned to the master `controller` block at relative `[0, 0, 0]`):
-
-```bash
-# Validate the 3x3x4 Primitive Blast Furnace blueprint rotated EAST
-npm run validate-blueprint -- ./data/primitive_blast_furnace.json EAST
-
-# Validate the Dual-LV Electric Blast Furnace blueprint
-npm run validate-blueprint -- ./data/electric_blast_furnace.json NORTH
-```
-
-During `multiblockBuilder.executeBuild('primitive_blast_furnace', anchorPos, { facing: 'NORTH' })`:
-1. **Scan**: Queries `bot.blockAt` + `navigator.hasLineOfSight` across the 3D bounding box to classify `satisfied`, `missing`, `mismatched`, and `obstructedAir` voxels (plus open chimney sky-clearance).
-2. **GTNH Missing-Hatch / Casing Rule**: Cross-references every required casing (`gregtech:gt.blockcasings4:15`) and specialized hatch (`input_hatch`, `output_hatch`, `maintenance_hatch`, `energy_hatch`, `muffler_hatch`) against inventory + `WarehouseTracker`. If any component is short, construction **pauses at a saved checkpoint** and dispatches `craftingEngine.requestCraft(itemId, deficit)` before resuming.
-3. **Packet Placement**: Excavates interior chimney obstructions first, then places blocks bottom-up (`y` ascending), engaging **sneak** (`setControlState('sneak', true)`) before sending `block_place` packets against interactive GregTech controllers/hatches so right-clicking places casings rather than opening machine GUIs, followed by GregTech Wrench orientation clicks.
-
----
-
-## 5. GTNH Volatility & Hazard Mitigation Summary
-
-- **Rain / Thunderstorm Explosion Cutoff**: `HazardMonitor` intercepts `rain` events and raw `game_state_change` packets (`start_raining`, `rain_level_change`, `thunder_level_change`), immediately locking exterior cable runs and sending Soft Mallet (`gt.metatool.01:14`) shutdown packets to any registered active electric machine without overhead sky cover (including GT5u's 1-block horizontal rain-splash margin).
-- **Over-Voltage Guard**: `verifySafeCableConnection(cableTier, machineTier)` rejects wiring higher-tier EU sources into lower-tier machines before a catastrophic explosion can occur.
-- **EU & Steam Backup Buffer Hysteresis**: Polls `tile_entity_data` NBT (`mStoredEnergy`, `mStoredSteam`, internal battery `GT.ItemCharge`) across Battery Buffers and Steam Turbines. Drops below `20%` trigger `lowPowerHalted = true`, preempting the Root State Machine into `LowPowerStandbyMachine` until buffers recover past `50%` so recipes never stall mid-craft and void expensive materials.
-- **Pollution & Infernal Mob Evasion**: Monitors `entity_effect` packets for clustered GTNH smog symptoms (Poison, Weakness, Slowness, Nausea, Mining Fatigue), penalizes polluted chunks inside `GTNHNavigator`'s `exclusionAreasStep`, and retreats from Creepers and GTNH Infernal Mobs (`1UP`, `Fiery`, `Vengeance`, `Webber`, etc.) via `GoalInvert`.

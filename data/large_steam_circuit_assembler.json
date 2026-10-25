@@ -1,0 +1,89 @@
+{
+  "blueprintId": "large_steam_circuit_assembler",
+  "name": "GregTech Leisure Large Steam Circuit Assembler",
+  "modpack": "GregTech Leisure (GTL)",
+  "mcVersion": "1.20.1",
+  "era": "STEAM_ULV",
+  "dimensions": { "width": 3, "height": 3, "depth": 3 },
+  "controllerAnchor": { "x": 0, "y": 0, "z": 0 },
+  "defaultFacing": "NORTH",
+  "description": "3x3x3 GTL Steam Overhaul multiblock relative to Large Steam Circuit Assembler controller at (0, 0, 0). Crafts kubejs:basic_control_circuit and kubejs:advanced_control_circuit using Steam Input Hatch + ULV Fluid Input Hatch (glue) + Steam Input/Output Buses.",
+  "formationCheck": {
+    "controllerOffset": { "x": 0, "y": 0, "z": 0 },
+    "nbtCompleteKey": "isFormed",
+    "expectedValue": 1,
+    "requiresMaintenanceFix": false
+  },
+  "palette": {
+    "CONTROLLER": {
+      "itemId": "gtceu:large_steam_circuit_assembler",
+      "label": "Large Steam Circuit Assembler Controller",
+      "requiresWrenchOrientation": true,
+      "facing": "FRONT"
+    },
+    "STEAM_CASING": {
+      "itemId": "gtceu:steam_machine_casing",
+      "label": "Bronze Steam Machine Casing"
+    },
+    "STEAM_INPUT_HATCH": {
+      "itemId": "gtceu:steam_input_hatch",
+      "label": "Steam Hatch",
+      "requiresWrenchOrientation": true,
+      "facing": "BACK"
+    },
+    "STEAM_INPUT_BUS": {
+      "itemId": "gtceu:steam_input_bus",
+      "label": "Steam Grinder Input Bus",
+      "requiresWrenchOrientation": true,
+      "facing": "FRONT"
+    },
+    "STEAM_OUTPUT_BUS": {
+      "itemId": "gtceu:steam_output_bus",
+      "label": "Steam Grinder Output Bus",
+      "requiresWrenchOrientation": true,
+      "facing": "LEFT"
+    },
+    "ULV_FLUID_HATCH": {
+      "itemId": "gtceu:ulv_input_hatch",
+      "label": "ULV Fluid Input Hatch (Glue)",
+      "requiresWrenchOrientation": true,
+      "facing": "RIGHT"
+    },
+    "AIR": {
+      "itemId": "minecraft:air",
+      "label": "Interior Cavity Air",
+      "mustBeAir": true
+    }
+  },
+  "blocks": [
+    { "x": -1, "y": 0, "z": 0,  "role": "STEAM_CASING" },
+    { "x": 0,  "y": 0, "z": 0,  "role": "CONTROLLER" },
+    { "x": 1,  "y": 0, "z": 0,  "role": "STEAM_INPUT_BUS" },
+    { "x": -1, "y": 0, "z": -1, "role": "STEAM_OUTPUT_BUS" },
+    { "x": 0,  "y": 0, "z": -1, "role": "STEAM_CASING" },
+    { "x": 1,  "y": 0, "z": -1, "role": "ULV_FLUID_HATCH" },
+    { "x": -1, "y": 0, "z": -2, "role": "STEAM_CASING" },
+    { "x": 0,  "y": 0, "z": -2, "role": "STEAM_INPUT_HATCH" },
+    { "x": 1,  "y": 0, "z": -2, "role": "STEAM_CASING" },
+
+    { "x": -1, "y": 1, "z": 0,  "role": "STEAM_CASING" },
+    { "x": 0,  "y": 1, "z": 0,  "role": "STEAM_CASING" },
+    { "x": 1,  "y": 1, "z": 0,  "role": "STEAM_CASING" },
+    { "x": -1, "y": 1, "z": -1, "role": "STEAM_CASING" },
+    { "x": 0,  "y": 1, "z": -1, "role": "AIR" },
+    { "x": 1,  "y": 1, "z": -1, "role": "STEAM_CASING" },
+    { "x": -1, "y": 1, "z": -2, "role": "STEAM_CASING" },
+    { "x": 0,  "y": 1, "z": -2, "role": "STEAM_CASING" },
+    { "x": 1,  "y": 1, "z": -2, "role": "STEAM_CASING" },
+
+    { "x": -1, "y": 2, "z": 0,  "role": "STEAM_CASING" },
+    { "x": 0,  "y": 2, "z": 0,  "role": "STEAM_CASING" },
+    { "x": 1,  "y": 2, "z": 0,  "role": "STEAM_CASING" },
+    { "x": -1, "y": 2, "z": -1, "role": "STEAM_CASING" },
+    { "x": 0,  "y": 2, "z": -1, "role": "STEAM_CASING" },
+    { "x": 1,  "y": 2, "z": -1, "role": "STEAM_CASING" },
+    { "x": -1, "y": 2, "z": -2, "role": "STEAM_CASING" },
+    { "x": 0,  "y": 2, "z": -2, "role": "STEAM_CASING" },
+    { "x": 1,  "y": 2, "z": -2, "role": "STEAM_CASING" }
+  ]
+}

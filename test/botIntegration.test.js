@@ -2,115 +2,124 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const Vec3 = require('vec3');
 
 const {
   FMLHandshakeClientState,
-  createFmlProto,
+  FML_LOGIN_WRAPPER_CHANNEL,
+  FML_HANDSHAKE_CHANNEL,
+  encodeVarInt,
+  encodeVarIntString,
+  wrapLoginPluginPayload,
   attachForgeHandshake
 } = require('../src/protocol/forgeHandshake');
 const { GTNHNavigator } = require('../src/navigation/gtnhNavigator');
-const { GTNHAutomationAgent } = require('../src/bot');
+const { GTLAutomationAgent } = require('../src/bot');
+const {
+  parseSnbt,
+  transformFtbQuestsChapter,
+  runIngestPipeline
+} = require('../src/cli/ingestData');
 
-function encodeVarInt(value) {
-  const bytes = [];
-  let v = value >>> 0;
-  while ((v & ~0x7f) !== 0) {
-    bytes.push((v & 0x7f) | 0x80);
-    v >>>= 7;
-  }
-  bytes.push(v & 0x7f);
-  return Buffer.from(bytes);
-}
-
-function encodeVarIntString(str) {
-  const strBuf = Buffer.from(str, 'utf8');
-  return Buffer.concat([encodeVarInt(strBuf.length), strBuf]);
-}
-
-test('Forge 1.7.10 FML|HS handshake completes all 5 phases and maps dynamic ModIdData numeric IDs', () => {
-  const proto = createFmlProto();
+test('Forge 1.20.1 FML3 (fml:loginwrapper / fml:handshake) completes login-plugin handshake and syncs GTL 1.20.1 registries', () => {
   const outbound = [];
   const client = new EventEmitter();
-  client.version = '1.7.10';
+  client.version = '1.20.1';
   client.write = (name, payload) => {
     outbound.push({ name, payload });
   };
 
-  const session = attachForgeHandshake(client);
-  let completedPayload = null;
+  const session = attachForgeHandshake(client, { autoMirrorServerMods: true });
+  let completedInfo = null;
   client.once('fmlHandshakeComplete', (info) => {
-    completedPayload = info;
+    completedInfo = info;
   });
 
-  // 1. Server sends ServerHello (fmlProtocolVersion = 1 for Forge 1.7.10)
-  client.emit('custom_payload', {
-    channel: 'FML|HS',
-    data: proto.createPacketBuffer('FML|HS', {
-      discriminator: 'ServerHello',
-      fmlProtocolVersion: 1
-    })
-  });
-  assert.equal(session.getState(), FMLHandshakeClientState.WAITINGSERVERDATA);
-  assert.equal(outbound[0].payload.channel, 'REGISTER');
+  // Verify `\0FML3\0` host marker injection on set_protocol
+  const handshakePkt = { serverHost: '127.0.0.1', serverPort: 25565, nextState: 2 };
+  client.write('set_protocol', handshakePkt);
+  assert.equal(handshakePkt.serverHost, '127.0.0.1\0FML3\0');
 
-  // 2. Server sends ModList
-  client.emit('custom_payload', {
-    channel: 'FML|HS',
-    data: proto.createPacketBuffer('FML|HS', {
-      discriminator: 'ModList',
-      mods: [
-        { modid: 'Forge', version: '10.13.4.1614' },
-        { modid: 'gregtech', version: '5.09.45.210' }
-      ]
-    })
-  });
-  assert.equal(session.getState(), FMLHandshakeClientState.WAITINGSERVERCOMPLETE);
-
-  // 3. Server sends 1.7.10 ModIdData (discriminator = 3) with dynamic Forge block/item IDs
-  const modIdPacket = Buffer.concat([
-    Buffer.from([0x03]), // discriminator 3
-    encodeVarInt(2), // 2 entries
-    encodeVarIntString('\u0001gregtech:gt.blockmachines'),
-    encodeVarInt(1509),
-    encodeVarIntString('\u0002gregtech:gt.metaitem.01'),
-    encodeVarInt(7156)
+  // 1. Server sends S2C ModList (packetId = 1) inside `fml:loginwrapper`
+  const s2cModListInner = Buffer.concat([
+    encodeVarInt(1), // packetId = 1 (S2CModList)
+    encodeVarInt(3), // 3 mods: forge, gtceu, gtlcore
+    encodeVarIntString('forge'),
+    encodeVarIntString('gtceu'),
+    encodeVarIntString('gtlcore'),
+    encodeVarInt(1), // 1 channel
+    encodeVarIntString('gtceu:network'),
+    encodeVarIntString('1.6.4'),
+    encodeVarInt(2), // 2 registries
+    encodeVarIntString('minecraft:item'),
+    encodeVarIntString('minecraft:block')
   ]);
-  client.emit('custom_payload', { channel: 'FML|HS', data: modIdPacket });
-  assert.equal(session.getState(), FMLHandshakeClientState.PENDINGCOMPLETE);
-
-  // Verify bidirectional dynamic numeric ID <-> GTNH canonical ID translation!
-  assert.equal(
-    session.registryBridge.toCanonicalItemId({ type: 7156, metadata: 32700 }),
-    'gregtech:gt.metaitem.01:32700'
-  );
-  assert.equal(
-    session.registryBridge.fromCanonicalItemId('gregtech:gt.blockmachines:1400').blockId,
-    1509
-  );
-
-  // 4. Server sends HandshakeAck phase 2 (WAITINGACK) -> client enters COMPLETE
-  client.emit('custom_payload', {
-    channel: 'FML|HS',
-    data: proto.createPacketBuffer('FML|HS', { discriminator: 'HandshakeAck', phase: 2 })
+  client.emit('login_plugin_request', {
+    messageId: 10,
+    channel: FML_LOGIN_WRAPPER_CHANNEL,
+    data: wrapLoginPluginPayload(FML_HANDSHAKE_CHANNEL, s2cModListInner)
   });
+
+  assert.equal(session.getState(), FMLHandshakeClientState.WAITINGSERVERCOMPLETE);
+  const modListReply = outbound.find((p) => p.name === 'login_plugin_response' && p.payload.messageId === 10);
+  assert.ok(modListReply, 'Must reply to S2CModList with C2SModListReply (messageId 10)');
+  assert.ok(Buffer.isBuffer(modListReply.payload.data));
+
+  // 2. Server sends S2C Registry packet (packetId = 3) with snapshot entries
+  const snapshotJson = JSON.stringify({
+    entries: {
+      'gtceu:basic_electronic_circuit': 14200,
+      'kubejs:advanced_control_circuit': 18501,
+      'gtceu:electric_blast_furnace': 4110
+    }
+  });
+  const s2cRegistryInner = Buffer.concat([
+    encodeVarInt(3), // packetId = 3 (S2CRegistry)
+    encodeVarIntString('minecraft:item'),
+    Buffer.from([0x01]), // hasSnapshot = true
+    Buffer.from(snapshotJson, 'utf8')
+  ]);
+  client.emit('login_plugin_request', {
+    messageId: 11,
+    channel: FML_LOGIN_WRAPPER_CHANNEL,
+    data: wrapLoginPluginPayload(FML_HANDSHAKE_CHANNEL, s2cRegistryInner)
+  });
+
+  // Verify flattened 1.20.1 ResourceLocation <-> numeric ID translation!
+  assert.equal(
+    session.registryBridge.toCanonicalItemId({ itemId: 14200 }),
+    'gtceu:basic_electronic_circuit'
+  );
+  assert.equal(
+    session.registryBridge.fromCanonicalItemId('kubejs:advanced_control_circuit').itemId,
+    18501
+  );
+
+  // 3. Server sends S2C ConfigurationData (packetId = 4)
+  const s2cConfigInner = Buffer.concat([
+    encodeVarInt(4),
+    encodeVarIntString('gtceu-server.toml'),
+    Buffer.from('# server config', 'utf8')
+  ]);
+  client.emit('login_plugin_request', {
+    messageId: 12,
+    channel: FML_LOGIN_WRAPPER_CHANNEL,
+    data: wrapLoginPluginPayload(FML_HANDSHAKE_CHANNEL, s2cConfigInner)
+  });
+
+  // 4. Server transitions to Play (`success`) -> finalizes FML3 handshake!
+  client.emit('success', { uuid: '0000-0000', username: 'GTL_Automaton' });
   assert.equal(session.getState(), FMLHandshakeClientState.COMPLETE);
-
-  // 5. Server sends HandshakeAck phase 3 (COMPLETE) -> handshake finalized!
-  client.emit('custom_payload', {
-    channel: 'FML|HS',
-    data: proto.createPacketBuffer('FML|HS', { discriminator: 'HandshakeAck', phase: 3 })
-  });
-  assert.ok(completedPayload);
-  assert.equal(completedPayload.modsCount, 2);
-  assert.equal(completedPayload.mappedItems, 1);
-  assert.equal(completedPayload.mappedBlocks, 1);
+  assert.ok(completedInfo);
+  assert.equal(completedInfo.fmlVersion, 'FML3');
+  assert.equal(completedInfo.modsCount, 3);
+  assert.equal(completedInfo.mappedItems, 3);
 });
 
-test('GTNHNavigator enforces lava-vein proximity exclusion, vertical shaft drop protection, and DDA voxel raycasting', () => {
+test('GTLNavigator enforces lava-vein proximity exclusion, vertical shaft drop protection, and DDA voxel raycasting', () => {
   const worldMap = new Map();
-  // Ground everywhere except a 6-block deep shaft at (5, y, 5) and a lava vein at (10, 64, 10)
   for (let x = 0; x <= 15; x++) {
     for (let z = 0; z <= 15; z++) {
       if (x === 5 && z === 5) {
@@ -121,7 +130,7 @@ test('GTNHNavigator enforces lava-vein proximity exclusion, vertical shaft drop 
     }
   }
   worldMap.set('10,64,10', { type: 10, name: 'lava', boundingBox: 'empty', position: new Vec3(10, 64, 10) });
-  worldMap.set('3,65,0', { type: 45, name: 'brick_block', boundingBox: 'block', position: new Vec3(3, 65, 0) });
+  worldMap.set('3,65,0', { type: 45, name: 'bricks', boundingBox: 'block', position: new Vec3(3, 65, 0) });
 
   const mockBot = new EventEmitter();
   mockBot.entity = { position: new Vec3(0, 64, 0) };
@@ -137,23 +146,17 @@ test('GTNHNavigator enforces lava-vein proximity exclusion, vertical shaft drop 
 
   const nav = new GTNHNavigator(mockBot, { maxDropDown: 3 });
 
-  // Safe flat stone step has 0 penalty
   assert.equal(nav.evaluateStepPenalty({ position: new Vec3(2, 64, 2) }), 0);
-
-  // Stepping directly next to lava vein at (9, 64, 10) incurs >= 200 penalty
   assert.ok(nav.evaluateStepPenalty({ position: new Vec3(9, 64, 10) }) >= 200);
-
-  // Stepping over 6-block vertical shaft at (5, 64, 5) is blocked (>= 1000 penalty)
   assert.ok(nav.evaluateStepPenalty({ position: new Vec3(5, 64, 5) }) >= 1000);
 
-  // DDA Raycast along +X from (0.5, 65.5, 0.5) hits brick_block at (3, 65, 0) on West (-X) face
   const hit = nav.raycastVoxel(new Vec3(0.5, 65.5, 0.5), new Vec3(1, 0, 0), 6.0);
   assert.ok(hit);
   assert.deepEqual([hit.position.x, hit.position.y, hit.position.z], [3, 65, 0]);
   assert.deepEqual([hit.face.x, hit.face.y, hit.face.z], [-1, 0, 0]);
 });
 
-test('GTNHAutomationAgent drives 3-tier Hierarchical State Machine and preempts on low-EU / hazard emergencies', async () => {
+test('GTLAutomationAgent defaults to native 1.20.1, drives 3-tier FSM through Steam ULV quest 5F5F348E3A34827E, and preempts on low-EU', async () => {
   const client = new EventEmitter();
   client.write = () => {};
 
@@ -169,11 +172,14 @@ test('GTNHAutomationAgent drives 3-tier Hierarchical State Machine and preempts 
     position: pos.floored()
   });
 
-  const agent = new GTNHAutomationAgent({ autoReconnect: false });
-  // Stock initial Stone Age quest requirements so macro machine transitions cleanly into micro loop
+  const agent = new GTLAutomationAgent({ autoReconnect: false });
+  assert.equal(agent.config.version, '1.20.1');
+  assert.equal(agent.config.forgeBridgeMode, 'fml3_native_1201');
+
+  // Stock Copper + Tin ores/ingots so Steam Age Bronze quest (5F5F348E3A34827E) executes via CraftingMicroMachine!
   agent.warehouse.upsertContainer(new Vec3(101, 64, 100), {
-    'minecraft:log:0': 16,
-    'minecraft:flint:0': 6
+    'minecraft:raw_copper': 12,
+    'gtceu:raw_tin': 4
   });
 
   agent.attachBot(bot, {
@@ -183,13 +189,9 @@ test('GTNHAutomationAgent drives 3-tier Hierarchical State Machine and preempts 
 
   const sm = agent.stateMachineBundle;
   assert.ok(sm);
-  assert.equal(
-    sm.botStateMachine.nestedStateMachines.length,
-    8,
-    '1 Root (Depth 0) + 3 Depth-1 + 4 Depth-2 = 8 nested state machines'
-  );
+  assert.equal(sm.botStateMachine.nestedStateMachines.length, 8);
   const depths = new Set(sm.botStateMachine.nestedStateMachines.map((m) => m.depth));
-  assert.deepEqual(Array.from(depths).sort(), [0, 1, 2], 'Must span 3 hierarchical FSM depths');
+  assert.deepEqual(Array.from(depths).sort(), [0, 1, 2]);
 
   const tickMany = async (count) => {
     for (let i = 0; i < count; i++) {
@@ -200,8 +202,8 @@ test('GTNHAutomationAgent drives 3-tier Hierarchical State Machine and preempts 
 
   await tickMany(8);
   assert.ok(
-    agent.craftingEngine.completedQuests.has('quest_stone_001'),
-    'First Stone Age quest should complete via Macro -> CraftingMicroMachine transition'
+    agent.craftingEngine.completedQuests.has('5F5F348E3A34827E'),
+    'First GTL Steam ULV Bronze quest (5F5F348E3A34827E) should complete via Macro -> CraftingMicroMachine'
   );
 
   // Trigger Critical Low-Power EU emergency and verify Root FSM preempts into LowPowerStandbyMachine!
@@ -209,7 +211,7 @@ test('GTNHAutomationAgent drives 3-tier Hierarchical State Machine and preempts 
     id: 'test_buf',
     position: new Vec3(102, 64, 100),
     maxEu: 100000,
-    storedEu: 5000 // 5% < 20% critical!
+    storedEu: 5000
   });
   await tickMany(3);
   assert.equal(sm.rootMachine.activeState, sm.lowPowerStandbyMachine);
@@ -220,50 +222,27 @@ test('GTNHAutomationAgent drives 3-tier Hierarchical State Machine and preempts 
   assert.equal(sm.rootMachine.activeState, sm.macroProgressionMachine);
 });
 
-test('BetterQuesting DefaultQuests.json + NEI CSV ingestion pipeline transforms dumps into valid DAGs', () => {
-  const { transformBetterQuestingDump, parseNeiIdCsv } = require('../src/cli/ingestData');
+test('FTB Quests .snbt parser & ingestion pipeline imports GregTech Leisure chapter quests into a valid DAG', () => {
+  const sampleSnbtPath = path.resolve(__dirname, '../data/gtl_steam_sample.snbt');
+  const fs = require('node:fs');
+  const parsedSnbt = parseSnbt(fs.readFileSync(sampleSnbtPath, 'utf8'));
 
-  const sampleBq = {
-    'questDatabase:9': {
-      '0:10': {
-        'questID:3': 9001,
-        'preRequisites:11': [],
-        'properties:10': {
-          'betterquesting:10': {
-            'name:8': 'Mine Chalcopyrite Vein',
-            'questLogic:8': 'AND'
-          }
-        },
-        'tasks:9': {
-          '0:10': {
-            'taskID:8': 'bq_standard:retrieval',
-            'consume:1': 0,
-            'requiredItems:9': {
-              '0:10': {
-                'id:8': 'gregtech:gt.blockores',
-                'Damage:2': 855,
-                'Count:3': 64
-              }
-            }
-          }
-        }
-      }
-    }
-  };
+  assert.equal(parsedSnbt.id, '77F8039ACE718C6C');
+  assert.equal(parsedSnbt.quests.length, 4);
 
-  const transformed = transformBetterQuestingDump(sampleBq);
-  assert.equal(transformed.length, 1);
-  assert.equal(transformed[0].questId, 'bq_quest_9001');
-  assert.equal(transformed[0].tasks[0].requiredItems[0].itemId, 'gregtech:gt.blockores:855');
+  const quests = transformFtbQuestsChapter(parsedSnbt);
+  assert.equal(quests.length, 4);
+  assert.equal(quests[0].questId, '5F5F348E3A34827E');
+  assert.equal(quests[0].tasks[0].requiredItems[0].itemId, 'gtceu:bronze_ingot');
+  assert.equal(quests[0].tasks[0].requiredItems[0].count, 8);
 
-  const csv = [
-    'Name,ID,Has BlockItem,Mod',
-    'gregtech:gt.blockmachines,1509,true,gregtech',
-    'gregtech:gt.metaitem.01,7156,false,gregtech'
-  ].join('\n');
-  const parsedCsv = parseNeiIdCsv(csv);
-  assert.equal(parsedCsv.length, 2);
-  assert.equal(parsedCsv[0].kind, 'block');
-  assert.equal(parsedCsv[1].kind, 'item');
+  const circuitQuest = quests.find((q) => q.questId === '51A6B6CDC90D7E76');
+  assert.ok(circuitQuest);
+  assert.equal(circuitQuest.tasks[0].requiredItems[0].itemId, 'gtceu:programmed_circuit');
+  assert.equal(circuitQuest.tasks[0].requiredItems[0].nbtTag.Configuration, 1);
+
+  const report = runIngestPipeline(['--ftbquests', sampleSnbtPath, '--seed', '987654321']);
+  assert.equal(report.summary.isQuestDagAcyclic, true);
+  assert.equal(report.snbtQuestsImported, 4);
+  assert.equal(report.worldSeed, '987654321');
 });
-

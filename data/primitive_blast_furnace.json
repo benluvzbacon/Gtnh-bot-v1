@@ -1,110 +1,79 @@
 {
-  "schemaVersion": "1.0.0",
   "blueprintId": "primitive_blast_furnace",
-  "displayName": "Primitive Blast Furnace (Bricked Blast Furnace)",
-  "modpack": "GregTech: New Horizons",
-  "era": "STEAM_TIER",
-  "dimensions": {
-    "width": 3,
-    "height": 4,
-    "depth": 3
-  },
-  "canonicalFacing": "NORTH",
-  "anchorGridIndex": {
-    "x": 1,
-    "y": 1,
-    "z": 0
+  "name": "GregTech Leisure Primitive Blast Furnace (PBF)",
+  "modpack": "GregTech Leisure (GTL)",
+  "mcVersion": "1.20.1",
+  "era": "STEAM_ULV",
+  "dimensions": { "width": 3, "height": 4, "depth": 3 },
+  "controllerAnchor": { "x": 0, "y": 0, "z": 0 },
+  "defaultFacing": "NORTH",
+  "description": "3x4x3 Firebrick multiblock relative to PBF Controller at (0, 0, 0) on the front center of the second layer from bottom (y = -1..2, x = -1..1, z = -2..0). Interior chimney (0, 0..2, -1) MUST remain minecraft:air. In GTL, bottom-layer firebricks may optionally be swapped with ULV Input/Output Buses for hopper-free automation.",
+  "formationCheck": {
+    "controllerOffset": { "x": 0, "y": 0, "z": 0 },
+    "nbtCompleteKey": "isFormed",
+    "expectedValue": 1,
+    "requiresMaintenanceFix": false
   },
   "palette": {
-    "C": {
-      "itemId": "gregtech:gt.blockmachines:1400",
-      "blockName": "gt.blockmachines",
-      "metadata": 1400,
-      "role": "controller",
-      "facing": "front",
-      "sneakPlace": true,
-      "label": "Primitive Blast Furnace Controller"
+    "CONTROLLER": {
+      "itemId": "gtceu:primitive_blast_furnace",
+      "label": "Primitive Blast Furnace Controller",
+      "requiresWrenchOrientation": true,
+      "facing": "FRONT"
     },
-    "F": {
-      "itemId": "gregtech:gt.blockcasings4:15",
-      "blockName": "gt.blockcasings4",
-      "metadata": 15,
-      "role": "casing",
-      "sneakPlace": false,
-      "label": "Firebricks"
+    "FIREBRICK": {
+      "itemId": "gtceu:firebricks",
+      "label": "Firebricks",
+      "optionalBottomLayerReplacements": [
+        "gtceu:ulv_input_bus",
+        "gtceu:ulv_output_bus"
+      ]
     },
-    "I": {
-      "itemId": "gregtech:gt.blockmachines:151",
-      "blockName": "gt.blockmachines",
-      "metadata": 151,
-      "role": "input_hatch",
-      "facing": "west",
-      "sneakPlace": true,
-      "label": "ULV Input Hatch"
-    },
-    "O": {
-      "itemId": "gregtech:gt.blockmachines:161",
-      "blockName": "gt.blockmachines",
-      "metadata": 161,
-      "role": "output_hatch",
-      "facing": "east",
-      "sneakPlace": true,
-      "label": "ULV Output Hatch"
-    },
-    ".": {
-      "itemId": "minecraft:air:0",
-      "blockName": "air",
-      "metadata": 0,
-      "role": "air",
-      "label": "Interior Hollow Cavity (Air)"
+    "AIR": {
+      "itemId": "minecraft:air",
+      "label": "Required Interior Chimney Air Cavity",
+      "mustBeAir": true
     }
   },
-  "layers": [
-    {
-      "yIndex": 0,
-      "relativeY": -1,
-      "description": "Base foundation layer (3x3 solid Firebricks)",
-      "matrix": [
-        ["F", "F", "F"],
-        ["F", "F", "F"],
-        ["F", "F", "F"]
-      ]
-    },
-    {
-      "yIndex": 1,
-      "relativeY": 0,
-      "description": "Controller & Hatch ring (Controller front-center at anchor [0,0,0], Input West, Output East, hollow center)",
-      "matrix": [
-        ["F", "C", "F"],
-        ["I", ".", "O"],
-        ["F", "F", "F"]
-      ]
-    },
-    {
-      "yIndex": 2,
-      "relativeY": 1,
-      "description": "Middle chimney ring (8 Firebricks, hollow center)",
-      "matrix": [
-        ["F", "F", "F"],
-        ["F", ".", "F"],
-        ["F", "F", "F"]
-      ]
-    },
-    {
-      "yIndex": 3,
-      "relativeY": 2,
-      "description": "Top chimney ring (8 Firebricks, open top center for exhaust)",
-      "matrix": [
-        ["F", "F", "F"],
-        ["F", ".", "F"],
-        ["F", "F", "F"]
-      ]
-    }
-  ],
-  "gtnhConstraints": {
-    "minCasings": 30,
-    "requiredRoles": ["controller", "input_hatch", "output_hatch"],
-    "requiresMaintenance": false,
-    "openChimneyRelativeOffset": { "x": 0, "y": 3, "z": 1 }
-  }
+  "blocks": [
+    { "x": -1, "y": -1, "z": 0,  "role": "FIREBRICK" },
+    { "x": 0,  "y": -1, "z": 0,  "role": "FIREBRICK" },
+    { "x": 1,  "y": -1, "z": 0,  "role": "FIREBRICK" },
+    { "x": -1, "y": -1, "z": -1, "role": "FIREBRICK" },
+    { "x": 0,  "y": -1, "z": -1, "role": "FIREBRICK" },
+    { "x": 1,  "y": -1, "z": -1, "role": "FIREBRICK" },
+    { "x": -1, "y": -1, "z": -2, "role": "FIREBRICK" },
+    { "x": 0,  "y": -1, "z": -2, "role": "FIREBRICK" },
+    { "x": 1,  "y": -1, "z": -2, "role": "FIREBRICK" },
+
+    { "x": -1, "y": 0,  "z": 0,  "role": "FIREBRICK" },
+    { "x": 0,  "y": 0,  "z": 0,  "role": "CONTROLLER" },
+    { "x": 1,  "y": 0,  "z": 0,  "role": "FIREBRICK" },
+    { "x": -1, "y": 0,  "z": -1, "role": "FIREBRICK" },
+    { "x": 0,  "y": 0,  "z": -1, "role": "AIR" },
+    { "x": 1,  "y": 0,  "z": -1, "role": "FIREBRICK" },
+    { "x": -1, "y": 0,  "z": -2, "role": "FIREBRICK" },
+    { "x": 0,  "y": 0,  "z": -2, "role": "FIREBRICK" },
+    { "x": 1,  "y": 0,  "z": -2, "role": "FIREBRICK" },
+
+    { "x": -1, "y": 1,  "z": 0,  "role": "FIREBRICK" },
+    { "x": 0,  "y": 1,  "z": 0,  "role": "FIREBRICK" },
+    { "x": 1,  "y": 1,  "z": 0,  "role": "FIREBRICK" },
+    { "x": -1, "y": 1,  "z": -1, "role": "FIREBRICK" },
+    { "x": 0,  "y": 1,  "z": -1, "role": "AIR" },
+    { "x": 1,  "y": 1,  "z": -1, "role": "FIREBRICK" },
+    { "x": -1, "y": 1,  "z": -2, "role": "FIREBRICK" },
+    { "x": 0,  "y": 1,  "z": -2, "role": "FIREBRICK" },
+    { "x": 1,  "y": 1,  "z": -2, "role": "FIREBRICK" },
+
+    { "x": -1, "y": 2,  "z": 0,  "role": "FIREBRICK" },
+    { "x": 0,  "y": 2,  "z": 0,  "role": "FIREBRICK" },
+    { "x": 1,  "y": 2,  "z": 0,  "role": "FIREBRICK" },
+    { "x": -1, "y": 2,  "z": -1, "role": "FIREBRICK" },
+    { "x": 0,  "y": 2,  "z": -1, "role": "AIR" },
+    { "x": 1,  "y": 2,  "z": -1, "role": "FIREBRICK" },
+    { "x": -1, "y": 2,  "z": -2, "role": "FIREBRICK" },
+    { "x": 0,  "y": 2,  "z": -2, "role": "FIREBRICK" },
+    { "x": 1,  "y": 2,  "z": -2, "role": "FIREBRICK" }
+  ]
 }

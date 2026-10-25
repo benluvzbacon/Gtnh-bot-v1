@@ -1,0 +1,9 @@
+# FerriteCore Low-RAM Mixin Profile for GregTech Leisure (1.20.1)
+replaceNeighborLookup = true
+replacePropertyMap = true
+cacheMultipartModels = true
+reducedBlockStates = true
+dedupBakedQuads = true
+compactFastMap = true
+populateNeighborTable = false
+modelSides = true

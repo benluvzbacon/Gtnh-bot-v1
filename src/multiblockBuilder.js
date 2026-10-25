@@ -12,7 +12,7 @@ const {
 const HORIZONTAL_FACINGS = ['NORTH', 'EAST', 'SOUTH', 'WEST'];
 
 /**
- * Minecraft 1.7.10 / 1.8 `block_place` packet face direction indices:
+ * Minecraft 1.20.1 `block_place` packet face direction indices:
  * 0 = -Y (Bottom), 1 = +Y (Top), 2 = -Z (North), 3 = +Z (South), 4 = -X (West), 5 = +X (East)
  */
 const PLACE_FACES = [
@@ -32,11 +32,17 @@ const SPECIALIZED_HATCH_ROLES = new Set([
   'maintenance_hatch',
   'energy_hatch',
   'dynamo_hatch',
-  'muffler_hatch'
+  'muffler_hatch',
+  'steam_input_hatch',
+  'steam_input_bus',
+  'steam_output_bus',
+  'ulv_fluid_hatch'
 ]);
 
 const ROLE_BUILD_PRIORITY = Object.freeze({
   casing: 1,
+  firebrick: 1,
+  steam_casing: 1,
   frame: 1,
   coil: 2,
   glass: 2,
@@ -44,6 +50,10 @@ const ROLE_BUILD_PRIORITY = Object.freeze({
   input_hatch: 3,
   output_bus: 3,
   output_hatch: 3,
+  steam_input_bus: 3,
+  steam_output_bus: 3,
+  steam_input_hatch: 3,
+  ulv_fluid_hatch: 3,
   energy_hatch: 4,
   dynamo_hatch: 4,
   maintenance_hatch: 4,
@@ -53,8 +63,7 @@ const ROLE_BUILD_PRIORITY = Object.freeze({
 
 /**
  * Rotates an anchor-relative `(dx, dy, dz)` vector authored in `canonicalFacing`
- * (`'NORTH'`, where front face points toward `-Z` and depth extends toward `+Z`)
- * into `targetFacing` (`'NORTH'|'EAST'|'SOUTH'|'WEST'`).
+ * (`'NORTH'`) into `targetFacing` (`'NORTH'|'EAST'|'SOUTH'|'WEST'`).
  */
 function rotateRelativeOffset(offset, canonicalFacing = 'NORTH', targetFacing = 'NORTH') {
   const fromIdx = HORIZONTAL_FACINGS.indexOf(String(canonicalFacing).toUpperCase());
@@ -65,8 +74,6 @@ function rotateRelativeOffset(offset, canonicalFacing = 'NORTH', targetFacing = 
   const y = offset.y;
   let z = offset.z;
 
-  // Clockwise 90-degree rotation in Minecraft XZ plane (NORTH -Z -> EAST +X -> SOUTH +Z -> WEST -X):
-  // (x, z) -> (-z, x)
   for (let i = 0; i < steps; i++) {
     const nextX = -z;
     const nextZ = x;
@@ -78,7 +85,7 @@ function rotateRelativeOffset(offset, canonicalFacing = 'NORTH', targetFacing = 
 }
 
 /**
- * Resolves a semantic block-local facing ('front', 'back', 'west', 'east', 'up', 'down')
+ * Resolves a semantic block-local facing ('FRONT', 'BACK', 'LEFT', 'RIGHT', 'UP', 'DOWN')
  * into a world cardinal direction given the multiblock's overall `targetFacing`.
  */
 function resolveWorldBlockFacing(semanticFacing, targetFacing = 'NORTH') {
@@ -108,17 +115,12 @@ function resolveWorldBlockFacing(semanticFacing, targetFacing = 'NORTH') {
 }
 
 /**
- * 3D Structural Blueprint Parser & Spatial Multiblock Printer for GregTech: New Horizons.
+ * 3D Structural Blueprint Parser & Spatial Multiblock Printer for GregTech Leisure (1.20.1).
+ * Supports GTCEu Modern multiblocks (PBF with optional ULV bottom-layer buses, Dual-LV EBF
+ * with automatic `gtceu:duct_tape` Maintenance Hatch servicing, Large Steam Circuit Assembler),
+ * Minecraft 1.20.1 `block_place` sequence packets, and missing-hatch craft delegation.
  */
 class MultiblockBuilder extends EventEmitter {
-  /**
-   * @param {Object} [options]
-   * @param {import('mineflayer').Bot|null} [options.bot]
-   * @param {import('./navigation/gtnhNavigator').GTNHNavigator|null} [options.navigator]
-   * @param {import('./craftingEngine').CraftingEngine|null} [options.craftingEngine]
-   * @param {import('./craftingEngine').WarehouseTracker|null} [options.warehouse]
-   * @param {ForgeRegistryBridge} [options.registryBridge]
-   */
   constructor(options = {}) {
     super();
     this.bot = options.bot || null;
@@ -134,20 +136,20 @@ class MultiblockBuilder extends EventEmitter {
     this.blueprints = new Map();
     this.activeBuildCheckpoint = null;
     this.placementPacketLog = [];
+    this._blockSequence = 0;
   }
 
-  /**
-   * Loads a 3D multiblock JSON schematic from disk and caches it by `blueprintId`.
-   */
+  nextBlockSequence() {
+    this._blockSequence = (this._blockSequence + 1) % 1000000;
+    return this._blockSequence;
+  }
+
   loadBlueprintFromFile(filePath) {
     const resolved = path.resolve(filePath);
     const raw = JSON.parse(fs.readFileSync(resolved, 'utf8'));
     return this.registerBlueprint(raw);
   }
 
-  /**
-   * Parses and validates a Litematica/Schematica-style 3D matrix blueprint or voxel list.
-   */
   registerBlueprint(rawBlueprint) {
     const parsed = this.parseBlueprint(rawBlueprint);
     this.blueprints.set(parsed.blueprintId, parsed);
@@ -155,7 +157,8 @@ class MultiblockBuilder extends EventEmitter {
   }
 
   /**
-   * Parses a raw JSON blueprint into anchor-relative 3D voxel descriptors and bill-of-materials.
+   * Parses a raw JSON blueprint (`blocks` role array, `layers` 3D character matrix,
+   * or `voxels` explicit array) into anchor-relative 3D voxel descriptors and BOM.
    */
   parseBlueprint(raw) {
     if (!raw || typeof raw !== 'object') {
@@ -163,12 +166,45 @@ class MultiblockBuilder extends EventEmitter {
     }
 
     const blueprintId = raw.blueprintId || raw.name || 'unnamed_multiblock';
-    const canonicalFacing = (raw.canonicalFacing || 'NORTH').toUpperCase();
-    const anchorIdx = raw.anchorGridIndex || { x: 0, y: 0, z: 0 };
+    const canonicalFacing = (raw.canonicalFacing || raw.defaultFacing || 'NORTH').toUpperCase();
+    const anchorIdx = raw.anchorGridIndex || raw.controllerAnchor || { x: 0, y: 0, z: 0 };
     const palette = raw.palette || {};
     const voxels = [];
 
-    if (Array.isArray(raw.layers)) {
+    if (Array.isArray(raw.blocks)) {
+      for (const blk of raw.blocks) {
+        const entry = palette[blk.role];
+        if (!entry) {
+          throw new Error(
+            `Blueprint '${blueprintId}' references undefined palette role '${blk.role}' at (${blk.x}, ${blk.y}, ${blk.z})`
+          );
+        }
+        const normalizedRole = String(entry.role || blk.role).toLowerCase();
+        const relOffset = new Vec3(
+          blk.x - (anchorIdx.x || 0),
+          blk.y - (anchorIdx.y || 0),
+          blk.z - (anchorIdx.z || 0)
+        );
+        const itemId = normalizeItemId(entry.itemId);
+        voxels.push({
+          symbol: blk.role,
+          gridIndex: relOffset.clone(),
+          relativeOffset: relOffset,
+          itemId,
+          blockName: entry.blockName || itemId.split(':')[1] || 'air',
+          role: normalizedRole,
+          facing: blk.facing || entry.facing || null,
+          requiresWrenchOrientation: Boolean(entry.requiresWrenchOrientation),
+          requiresAirClearanceAbove: Boolean(entry.requiresAirClearanceAbove),
+          optionalAlternatives: (entry.optionalBottomLayerReplacements || []).map(normalizeItemId),
+          sneakPlace: Boolean(
+            entry.sneakPlace ??
+            (SPECIALIZED_HATCH_ROLES.has(normalizedRole) || normalizedRole === 'controller')
+          ),
+          label: entry.label || itemId
+        });
+      }
+    } else if (Array.isArray(raw.layers)) {
       for (let layerPos = 0; layerPos < raw.layers.length; layerPos++) {
         const layer = raw.layers[layerPos];
         const yGrid = layer.yIndex ?? layerPos;
@@ -188,24 +224,31 @@ class MultiblockBuilder extends EventEmitter {
               );
             }
 
+            const normalizedRole = String(entry.role || 'casing').toLowerCase();
             const relOffset = new Vec3(
               xGrid - anchorIdx.x,
               yGrid - anchorIdx.y,
               zGrid - anchorIdx.z
             );
+            const itemId = normalizeItemId(entry.itemId);
 
             voxels.push({
               symbol,
               gridIndex: new Vec3(xGrid, yGrid, zGrid),
               relativeOffset: relOffset,
-              itemId: normalizeItemId(entry.itemId),
-              blockName: entry.blockName || entry.itemId.split(':')[1] || 'air',
-              metadata: entry.metadata ?? 0,
-              role: entry.role || 'casing',
+              itemId,
+              blockName: entry.blockName || itemId.split(':')[1] || 'air',
+              role: normalizedRole,
               facing: entry.facing || null,
-              voltageTier: entry.voltageTier || null,
-              sneakPlace: Boolean(entry.sneakPlace || SPECIALIZED_HATCH_ROLES.has(entry.role) || entry.role === 'controller'),
-              label: entry.label || entry.itemId
+              requiresWrenchOrientation: Boolean(entry.requiresWrenchOrientation),
+              requiresAirClearanceAbove: Boolean(entry.requiresAirClearanceAbove),
+              optionalAlternatives: (entry.optionalBottomLayerReplacements || []).map(normalizeItemId),
+              sneakPlace: Boolean(
+                entry.sneakPlace ||
+                SPECIALIZED_HATCH_ROLES.has(normalizedRole) ||
+                normalizedRole === 'controller'
+              ),
+              label: entry.label || itemId
             });
           }
         }
@@ -215,40 +258,48 @@ class MultiblockBuilder extends EventEmitter {
         const off = Array.isArray(v.offset)
           ? new Vec3(v.offset[0], v.offset[1], v.offset[2])
           : new Vec3(v.offset.x, v.offset.y, v.offset.z);
+        const normalizedRole = String(v.role || 'casing').toLowerCase();
+        const itemId = normalizeItemId(v.itemId);
         voxels.push({
           symbol: v.symbol || '#',
           gridIndex: off.clone(),
           relativeOffset: off,
-          itemId: normalizeItemId(v.itemId),
-          blockName: v.blockName || v.itemId.split(':')[1] || 'air',
-          metadata: v.metadata ?? 0,
-          role: v.role || 'casing',
+          itemId,
+          blockName: v.blockName || itemId.split(':')[1] || 'air',
+          role: normalizedRole,
           facing: v.facing || null,
-          voltageTier: v.voltageTier || null,
-          sneakPlace: Boolean(v.sneakPlace || SPECIALIZED_HATCH_ROLES.has(v.role) || v.role === 'controller'),
-          label: v.label || v.itemId
+          requiresWrenchOrientation: Boolean(v.requiresWrenchOrientation),
+          requiresAirClearanceAbove: Boolean(v.requiresAirClearanceAbove),
+          optionalAlternatives: [],
+          sneakPlace: Boolean(
+            v.sneakPlace ||
+            SPECIALIZED_HATCH_ROLES.has(normalizedRole) ||
+            normalizedRole === 'controller'
+          ),
+          label: v.label || itemId
         });
       }
     } else {
-      throw new Error(`Blueprint '${blueprintId}' must define either 'layers' or 'voxels'`);
+      throw new Error(`Blueprint '${blueprintId}' must define 'blocks', 'layers', or 'voxels'`);
     }
 
     const billOfMaterials = new Map();
     const roleCounts = {};
     for (const v of voxels) {
       roleCounts[v.role] = (roleCounts[v.role] || 0) + 1;
-      if (v.role !== 'air') {
+      if (v.role !== 'air' && v.itemId !== 'minecraft:air') {
         billOfMaterials.set(v.itemId, (billOfMaterials.get(v.itemId) || 0) + 1);
       }
     }
 
     const parsed = {
       blueprintId,
-      displayName: raw.displayName || blueprintId,
-      era: raw.era || 'STEAM_TIER',
+      displayName: raw.displayName || raw.name || blueprintId,
+      era: raw.era || 'STEAM_ULV',
       dimensions: raw.dimensions || null,
       canonicalFacing,
       anchorGridIndex: anchorIdx,
+      formationCheck: raw.formationCheck || {},
       gtnhConstraints: raw.gtnhConstraints || {},
       voxels,
       billOfMaterials: Object.fromEntries(billOfMaterials),
@@ -258,17 +309,13 @@ class MultiblockBuilder extends EventEmitter {
     const validation = this.validateBlueprintStructure(parsed);
     if (!validation.valid) {
       throw new Error(
-        `Invalid GTNH Multiblock Blueprint '${blueprintId}': ${validation.errors.join('; ')}`
+        `Invalid GTL Multiblock Blueprint '${blueprintId}': ${validation.errors.join('; ')}`
       );
     }
 
     return parsed;
   }
 
-  /**
-   * Validates GTNH structural constraints: controller at anchor `[0,0,0]`, required
-   * specialized hatches present, and minimum casing count respected.
-   */
   validateBlueprintStructure(parsedBlueprint) {
     const errors = [];
     const controllers = parsedBlueprint.voxels.filter((v) => v.role === 'controller');
@@ -287,17 +334,20 @@ class MultiblockBuilder extends EventEmitter {
     const constraints = parsedBlueprint.gtnhConstraints || {};
     if (Array.isArray(constraints.requiredRoles)) {
       for (const reqRole of constraints.requiredRoles) {
-        if (!parsedBlueprint.roleCounts[reqRole]) {
-          errors.push(`Missing required GTNH hatch/structural role '${reqRole}'`);
+        if (!parsedBlueprint.roleCounts[String(reqRole).toLowerCase()]) {
+          errors.push(`Missing required hatch/structural role '${reqRole}'`);
         }
       }
     }
 
     if (Number.isFinite(constraints.minCasings)) {
-      const actualCasings = parsedBlueprint.roleCounts.casing || 0;
+      const actualCasings =
+        (parsedBlueprint.roleCounts.casing || 0) +
+        (parsedBlueprint.roleCounts.firebrick || 0) +
+        (parsedBlueprint.roleCounts.steam_casing || 0);
       if (actualCasings < constraints.minCasings) {
         errors.push(
-          `Insufficient casings: blueprint has ${actualCasings}, GTNH minimum is ${constraints.minCasings}`
+          `Insufficient casings: blueprint has ${actualCasings}, minimum is ${constraints.minCasings}`
         );
       }
     }
@@ -305,10 +355,6 @@ class MultiblockBuilder extends EventEmitter {
     return { valid: errors.length === 0, errors };
   }
 
-  /**
-   * Projects a parsed blueprint onto concrete world coordinates anchored at `anchorPos`
-   * with cardinal orientation `targetFacing` ('NORTH', 'EAST', 'SOUTH', 'WEST').
-   */
   projectToWorld(blueprintOrId, anchorPos, targetFacing = 'NORTH') {
     const bp = typeof blueprintOrId === 'string'
       ? this.blueprints.get(blueprintOrId)
@@ -328,6 +374,8 @@ class MultiblockBuilder extends EventEmitter {
     let maxY = -Infinity;
     let maxZ = -Infinity;
 
+    const airClearancePositions = [];
+
     const cells = bp.voxels.map((voxel) => {
       const rotated = rotateRelativeOffset(
         voxel.relativeOffset,
@@ -344,6 +392,10 @@ class MultiblockBuilder extends EventEmitter {
       maxY = Math.max(maxY, worldPos.y);
       maxZ = Math.max(maxZ, worldPos.z);
 
+      if (voxel.requiresAirClearanceAbove) {
+        airClearancePositions.push(worldPos.offset(0, 1, 0));
+      }
+
       return {
         ...voxel,
         rotatedOffset: rotated,
@@ -353,7 +405,6 @@ class MultiblockBuilder extends EventEmitter {
       };
     });
 
-    let chimneyWorldPos = null;
     if (bp.gtnhConstraints?.openChimneyRelativeOffset) {
       const rotChimney = rotateRelativeOffset(
         new Vec3(
@@ -364,7 +415,21 @@ class MultiblockBuilder extends EventEmitter {
         bp.canonicalFacing,
         targetFacing
       );
-      chimneyWorldPos = anchor.plus(rotChimney);
+      airClearancePositions.push(anchor.plus(rotChimney));
+    }
+
+    let maintenanceHatchWorldPos = null;
+    if (bp.formationCheck?.maintenanceHatchOffset) {
+      const rotMaint = rotateRelativeOffset(
+        new Vec3(
+          bp.formationCheck.maintenanceHatchOffset.x,
+          bp.formationCheck.maintenanceHatchOffset.y,
+          bp.formationCheck.maintenanceHatchOffset.z
+        ),
+        bp.canonicalFacing,
+        targetFacing
+      );
+      maintenanceHatchWorldPos = anchor.plus(rotMaint);
     }
 
     return {
@@ -375,16 +440,13 @@ class MultiblockBuilder extends EventEmitter {
         min: new Vec3(minX, minY, minZ),
         max: new Vec3(maxX, maxY, maxZ)
       },
-      chimneyWorldPos,
+      chimneyWorldPos: airClearancePositions[0] || null,
+      airClearancePositions,
+      maintenanceHatchWorldPos,
       cells
     };
   }
 
-  /**
-   * Scans the target 3D bounding box using chunk cache (`bot.blockAt`) AND raycast
-   * visibility analysis (`navigator.hasLineOfSight` / `bot.world.raycast`) to detect
-   * satisfied, missing, mismatched, and obstructed-air blocks.
-   */
   scanStructureState(projection, botInstance = null) {
     const bot = botInstance || this.bot;
     if (!bot || typeof bot.blockAt !== 'function') {
@@ -443,8 +505,8 @@ class MultiblockBuilder extends EventEmitter {
     }
 
     let chimneyClear = true;
-    if (projection.chimneyWorldPos) {
-      const exhaustBlock = bot.blockAt(projection.chimneyWorldPos);
+    for (const exhaustPos of projection.airClearancePositions || []) {
+      const exhaustBlock = bot.blockAt(exhaustPos);
       if (exhaustBlock && !this._isAirOrReplaceable(exhaustBlock)) {
         chimneyClear = false;
       }
@@ -487,38 +549,41 @@ class MultiblockBuilder extends EventEmitter {
     return (
       block.type === 0 ||
       name === 'air' ||
+      name === 'minecraft:air' ||
       name === 'cave_air' ||
       name === 'void_air' ||
-      name === 'tallgrass' ||
-      name === 'snow_layer'
+      name === 'grass' ||
+      name === 'short_grass' ||
+      name === 'tall_grass' ||
+      name === 'snow'
     );
   }
 
   _describeWorldBlock(block) {
     const canonical = this.registryBridge.toCanonicalItemId({
       type: block.type,
-      name: block.name,
-      metadata: block.metadata ?? 0
+      name: block.name
     });
-    return canonical || `${block.name}:${block.metadata ?? 0}`;
+    return canonical || normalizeItemId(block.name || 'minecraft:air');
   }
 
   _blockMatchesCell(block, cell) {
     const actualCanonical = this._describeWorldBlock(block);
     if (actualCanonical === cell.itemId) return true;
 
-    const blockShort = (block.name || '').replace(/^minecraft:/, '').replace(/^gregtech:/, '');
-    const expectedShort = (cell.blockName || '').replace(/^minecraft:/, '').replace(/^gregtech:/, '');
-    const actualMeta = block.metadata ?? 0;
-    return blockShort === expectedShort && actualMeta === cell.metadata;
+    // Support GTL bottom-layer bus replacements on PBF (e.g., gtceu:ulv_input_bus / gtceu:ulv_output_bus)
+    if (
+      cell.rotatedOffset?.y === -1 &&
+      Array.isArray(cell.optionalAlternatives) &&
+      cell.optionalAlternatives.includes(actualCanonical)
+    ) {
+      return true;
+    }
+
+    const stripNs = (s) => String(s || '').replace(/^[a-z0-9_.-]+:/i, '').toLowerCase();
+    return stripNs(block.name) === stripNs(cell.blockName);
   }
 
-  /**
-   * Orders missing/mismatched placement cells safely:
-   *  - Bottom-up (`y` ascending) so every layer has solid floor/casing support
-   *  - Casings & coils before specialized hatches & controller on the same layer
-   *  - Back-to-front relative to controller (`rotatedOffset.z` descending for NORTH)
-   */
   _sortPlacementOrder(entries, anchorPos) {
     return entries.slice().sort((a, b) => {
       if (a.cell.worldPos.y !== b.cell.worldPos.y) {
@@ -535,23 +600,6 @@ class MultiblockBuilder extends EventEmitter {
     });
   }
 
-  /**
-   * Executes the full 3D multiblock construction loop for `blueprintOrId` at `anchorPos`:
-   *  a. Scans the 3D bounding box via chunk cache & raycast analysis.
-   *  b. Checks available casings, specialized hatches (Input/Output/Maintenance/Energy/Muffler),
-   *     and controller in bot inventory + `WarehouseTracker`.
-   *  c. GTNH Missing-Component Rule: if any component is missing, pauses construction,
-   *     saves a resumable checkpoint, and dispatches `craftingEngine.requestCraft(...)`
-   *     for every missing item before resuming.
-   *  d. Excavates obstructions/mismatches, fetches components from warehouse chests,
-   *     pathfinds to safe placement poses, and sends sneak-guarded `block_place` packets.
-   *
-   * @param {string|Object} blueprintOrId
-   * @param {Vec3|{x:number,y:number,z:number}} anchorPos
-   * @param {Object} [options]
-   * @param {string} [options.facing='NORTH']
-   * @param {Function} [options.onCraftRequired] - Optional async hook `(craftJobs) => Promise<boolean>` to fulfill crafts inline and auto-resume!
-   */
   async executeBuild(blueprintOrId, anchorPos, options = {}) {
     const facing = (options.facing || 'NORTH').toUpperCase();
     const projection = this.projectToWorld(blueprintOrId, anchorPos, facing);
@@ -574,11 +622,11 @@ class MultiblockBuilder extends EventEmitter {
         blueprintId: projection.blueprint.blueprintId,
         placedCount: 0,
         dugCount: 0,
+        maintenanceServiced: false,
         scan
       };
     }
 
-    // Cross-reference all needed casings, hatches, and controller against inventory + warehouse
     const combinedStock = this.warehouse
       ? this.warehouse.getCombinedStock(this.bot, options.inventoryOverride || null)
       : this._readBotInventoryMap();
@@ -623,14 +671,13 @@ class MultiblockBuilder extends EventEmitter {
 
       this.emit('buildPausedMissingMaterials', this.activeBuildCheckpoint);
 
-      // If caller provided an inline craft fulfillment callback, run it and immediately resume!
       if (typeof options.onCraftRequired === 'function') {
         const fulfilled = await options.onCraftRequired(craftJobs, missingMaterials);
         if (fulfilled) {
           this.activeBuildCheckpoint = null;
           return this.executeBuild(blueprintOrId, anchorPos, {
             ...options,
-            onCraftRequired: null // Prevent unbounded recursion if still short
+            onCraftRequired: null
           });
         }
       }
@@ -648,7 +695,6 @@ class MultiblockBuilder extends EventEmitter {
     let dugCount = 0;
     let placedCount = 0;
 
-    // Step 1: Clear obstructed interior air blocks and mismatched blocks (top-down)
     const digTargets = [...scan.obstructedAir, ...scan.mismatched].sort(
       (a, b) => b.cell.worldPos.y - a.cell.worldPos.y
     );
@@ -658,13 +704,13 @@ class MultiblockBuilder extends EventEmitter {
       dugCount++;
     }
 
-    // Also clear chimney obstruction if present
-    if (!scan.chimneyClear && projection.chimneyWorldPos) {
-      await this._excavateBlock(projection.chimneyWorldPos);
-      dugCount++;
+    if (!scan.chimneyClear) {
+      for (const exhaustPos of projection.airClearancePositions || []) {
+        await this._excavateBlock(exhaustPos);
+        dugCount++;
+      }
     }
 
-    // Step 2: Place all missing + formerly-mismatched structural blocks bottom-up
     const toPlace = this._sortPlacementOrder(
       [...scan.missing, ...scan.mismatched],
       projection.anchor
@@ -682,11 +728,16 @@ class MultiblockBuilder extends EventEmitter {
       });
     }
 
-    // Step 3: Re-scan to verify complete GTNH multiblock formation
     const finalScan = this.scanStructureState(projection);
+    let maintenanceServiced = false;
+
     if (finalScan.isComplete) {
       this._protectCompletedStructure(projection);
       this.activeBuildCheckpoint = null;
+
+      if (projection.blueprint.formationCheck?.requiresMaintenanceFix) {
+        maintenanceServiced = await this.serviceMaintenanceHatchWithDuctTape(projection);
+      }
     }
 
     const result = {
@@ -694,6 +745,7 @@ class MultiblockBuilder extends EventEmitter {
       blueprintId: projection.blueprint.blueprintId,
       placedCount,
       dugCount,
+      maintenanceServiced,
       scan: finalScan
     };
     this.emit('buildFinished', result);
@@ -701,8 +753,49 @@ class MultiblockBuilder extends EventEmitter {
   }
 
   /**
-   * Resumes a previously paused multiblock construction from `this.activeBuildCheckpoint`.
+   * Services a GTCEu Maintenance Hatch using `gtceu:duct_tape` (rewarded x256 in GTL LV quest
+   * `3F38CC8C8D650202`) so newly formed multiblocks like the EBF start with 0 maintenance faults.
    */
+  async serviceMaintenanceHatchWithDuctTape(projection) {
+    if (!projection.maintenanceHatchWorldPos || !this.bot) return false;
+    const serviceItem = projection.blueprint.formationCheck?.serviceItemId || 'gtceu:duct_tape';
+
+    const invMap = this._readBotInventoryMap();
+    const warehouseHas = this.warehouse
+      ? (this.warehouse.getWarehouseTotals().get(serviceItem) || 0) > 0
+      : false;
+    if ((invMap.get(serviceItem) || 0) === 0 && !warehouseHas) {
+      return false;
+    }
+
+    await this._ensureItemReadyForPlacement(serviceItem, 1);
+    const maintPos = projection.maintenanceHatchWorldPos;
+
+    if (this.navigator) {
+      await this.navigator.gotoPlacementPose(maintPos, 4.2);
+    }
+
+    if (this.bot._client && typeof this.bot._client.write === 'function') {
+      this.bot._client.write('block_place', {
+        hand: 0,
+        location: { x: maintPos.x, y: maintPos.y, z: maintPos.z },
+        direction: 2,
+        cursorX: 0.5,
+        cursorY: 0.5,
+        cursorZ: 0.5,
+        insideBlock: false,
+        sequence: this.nextBlockSequence()
+      });
+      this.emit('maintenanceServiced', {
+        blueprintId: projection.blueprint.blueprintId,
+        position: maintPos,
+        serviceItem
+      });
+      return true;
+    }
+    return false;
+  }
+
   async resumePausedBuild(options = {}) {
     if (!this.activeBuildCheckpoint) {
       return { status: 'NO_ACTIVE_CHECKPOINT' };
@@ -766,7 +859,7 @@ class MultiblockBuilder extends EventEmitter {
             (it) => this.registryBridge.toCanonicalItemId(it) === itemId
           );
           if (matchingItem && typeof win.withdraw === 'function') {
-            await win.withdraw(matchingItem.type, matchingItem.metadata ?? null, count);
+            await win.withdraw(matchingItem.type, null, count);
           }
         } finally {
           if (typeof win.close === 'function') win.close();
@@ -803,9 +896,9 @@ class MultiblockBuilder extends EventEmitter {
   }
 
   /**
-   * Navigates to a safe adjacent standing pose, selects a solid neighbor reference face,
-   * engages sneaking (preventing GregTech controller/hatch GUIs from intercepting right-click!),
-   * sends the `block_place` network packet, and orients directional hatches if needed.
+   * Emits a Minecraft 1.20.1 `block_place` packet with `hand`, `location`, `direction`,
+   * float `cursorX/Y/Z` (`0.5`), `insideBlock: false`, and monotonic `sequence`,
+   * holding `sneak` so GTCEu controllers/hatches do not open LDLib GUIs on right-click.
    */
   async _placeStructuralVoxel(cell) {
     const targetPos = cell.worldPos;
@@ -814,7 +907,6 @@ class MultiblockBuilder extends EventEmitter {
     }
 
     const refChoice = this._selectReferenceBlockFace(targetPos);
-    const wireHeldItem = this._buildWireHeldItem(cell.itemId);
 
     if (this.bot && typeof this.bot.lookAt === 'function') {
       const hitPoint = refChoice.refBlockPos.offset(0.5, 0.5, 0.5).plus(
@@ -829,16 +921,18 @@ class MultiblockBuilder extends EventEmitter {
 
     try {
       const packetPayload = {
+        hand: 0,
         location: {
           x: refChoice.refBlockPos.x,
           y: refChoice.refBlockPos.y,
           z: refChoice.refBlockPos.z
         },
         direction: refChoice.face.dirIndex,
-        heldItem: wireHeldItem,
-        cursorX: 8,
-        cursorY: 8,
-        cursorZ: 8
+        cursorX: 0.5,
+        cursorY: 0.5,
+        cursorZ: 0.5,
+        insideBlock: false,
+        sequence: this.nextBlockSequence()
       };
 
       this.placementPacketLog.push({
@@ -858,8 +952,7 @@ class MultiblockBuilder extends EventEmitter {
         this.bot._ApplyVirtualPlacement(targetPos, cell);
       }
 
-      // If placing a directional GTNH hatch/controller, apply GregTech Wrench sub-grid click vector
-      if (cell.worldFacing && (cell.isSpecializedHatch || cell.role === 'controller')) {
+      if (cell.worldFacing && (cell.isSpecializedHatch || cell.role === 'controller' || cell.requiresWrenchOrientation)) {
         await this._orientGregTechHatchIfNeeded(targetPos, cell.worldFacing);
       }
     } finally {
@@ -879,33 +972,22 @@ class MultiblockBuilder extends EventEmitter {
         }
       }
     }
-    // Fallback to top face of block below targetPos
     return {
       refBlockPos: targetPos.offset(0, -1, 0),
       face: PLACE_FACES[0]
     };
   }
 
-  _buildWireHeldItem(itemId) {
-    const mapped = this.registryBridge.fromCanonicalItemId(itemId, this.bot?.registry);
-    return {
-      blockId: mapped.blockId !== -1 ? mapped.blockId : 1,
-      itemCount: 1,
-      itemDamage: mapped.itemDamage,
-      nbtData: undefined
-    };
-  }
-
   /**
-   * Simulates GregTech 3x3 wrench hit-box sub-quadrant orientation click on `targetPos`
-   * when a wrench is present in the bot's toolkit.
+   * Uses a GTCEu Wrench (`gtceu:iron_wrench` / `gtceu:steel_wrench` / `gtceu:lv_wrench`)
+   * on the target face in 1.20.1 (`cursorX/Y/Z: 0.5`) to orient hatches & controllers.
    */
   async _orientGregTechHatchIfNeeded(targetPos, desiredWorldFacing) {
     if (!this.bot?.inventory?.items || !this.bot?._client?.write) return;
 
     const wrench = this.bot.inventory.items().find((it) => {
-      const id = this.registryBridge.toCanonicalItemId(it) || '';
-      return id.includes('metatool') || (it.name || '').toLowerCase().includes('wrench');
+      const id = (this.registryBridge.toCanonicalItemId(it) || '').toLowerCase();
+      return id.includes('wrench') || (it.name || '').toLowerCase().includes('wrench');
     });
     if (!wrench) return;
 
@@ -921,18 +1003,15 @@ class MultiblockBuilder extends EventEmitter {
     };
     const dirIndex = faceMap[desiredWorldFacing] ?? 2;
 
-    // GregTech 5 center sub-grid (cursor 8, 8, 8) sets main output/front facing to clicked face
     this.bot._client.write('block_place', {
+      hand: 0,
       location: { x: targetPos.x, y: targetPos.y, z: targetPos.z },
       direction: dirIndex,
-      heldItem: {
-        blockId: wrench.type ?? 7150,
-        itemCount: 1,
-        itemDamage: wrench.metadata ?? 16
-      },
-      cursorX: 8,
-      cursorY: 8,
-      cursorZ: 8
+      cursorX: 0.5,
+      cursorY: 0.5,
+      cursorZ: 0.5,
+      insideBlock: false,
+      sequence: this.nextBlockSequence()
     });
   }
 }

@@ -14,52 +14,62 @@ const CARDINAL_OFFSETS = [
   new Vec3(0, 0, -1)
 ];
 
+const FACING_VECTORS = Object.freeze({
+  NORTH: new Vec3(0, 0, -1),
+  SOUTH: new Vec3(0, 0, 1),
+  WEST: new Vec3(-1, 0, 0),
+  EAST: new Vec3(1, 0, 0),
+  UP: new Vec3(0, 1, 0),
+  DOWN: new Vec3(0, -1, 0)
+});
+
 const DEFAULT_HAZARD_BLOCK_NAMES = [
   'lava',
   'flowing_lava',
   'fire',
+  'soul_fire',
+  'campfire',
+  'soul_campfire',
+  'magma_block',
+  'powder_snow',
   'cactus',
-  'web',
   'cobweb',
-  'gt.blockfluid.pollution',
-  'gt.blockfluid.acid',
+  'sweet_berry_bush',
+  'wither_rose',
+  'sulfuric_acid',
+  'hydrochloric_acid',
+  'hydrofluoric_acid',
   'oil',
-  'fluid_oil',
-  'poison_fluid'
+  'oil_heavy',
+  'cryo_fuel'
 ];
 
 /**
- * Spatial navigation & hazard-aware pathfinding wrapper tailored for Forge 1.7.10
- * and GregTech: New Horizons environmental constraints.
+ * Spatial navigation & hazard-aware pathfinding wrapper tailored for Minecraft 1.20.1
+ * and GregTech Leisure (GTL) base safety constraints (uninsulated GTCEu wires, scalding
+ * steam exhaust vents, unframed hot fluid pipes, protected multiblock footprints, and
+ * deep mining shafts down to Y = -64).
  */
 class GTNHNavigator extends EventEmitter {
-  /**
-   * @param {import('mineflayer').Bot} bot
-   * @param {Object} [options]
-   * @param {number} [options.maxDropDown=3] - Maximum safe vertical drop (<=3 avoids fall damage & vertical shafts)
-   * @param {number} [options.thinkTimeoutMs=6000]
-   * @param {boolean} [options.canDigInWild=true]
-   * @param {number} [options.pollutionThresholdGibbl=500000]
-   */
   constructor(bot, options = {}) {
     super();
     this.bot = bot;
     this.options = {
       maxDropDown: options.maxDropDown ?? 3,
-      thinkTimeoutMs: options.thinkTimeoutMs ?? 6000,
+      thinkTimeoutMs: options.thinkTimeoutMs ?? 5000,
       canDigInWild: options.canDigInWild ?? true,
       pollutionThresholdGibbl: options.pollutionThresholdGibbl ?? 500000,
       lavaSafetyMargin: options.lavaSafetyMargin ?? 1
     };
 
-    /** @type {Map<string, { chunkX: number, chunkZ: number, gibbl: number, updatedAt: number }>} */
     this.pollutedChunks = new Map();
-    /** @type {Array<{ id: string, min: Vec3, max: Vec3, penalty: number }>} */
     this.pollutionZones = [];
-    /** @type {Array<{ id: string, min: Vec3, max: Vec3 }>} */
     this.protectedStructures = [];
-    /** @type {Set<string>} */
     this.liveWireCoords = new Set();
+    /** @type {Set<string>} Air blocks directly in front of GTCEu steam exhaust vents (never step in or obstruct!) */
+    this.steamExhaustVentCoords = new Set();
+    /** @type {Set<string>} Unframed hot fluid/steam pipes that scald on contact */
+    this.hotPipeCoords = new Set();
 
     this.movements = null;
     this._initialized = false;
@@ -96,9 +106,6 @@ class GTNHNavigator extends EventEmitter {
     }
   }
 
-  /**
-   * Builds and applies GTNH-hardened `Movements` onto `bot.pathfinder`.
-   */
   configureMovements() {
     if (!this.bot || !this.bot.registry) return null;
 
@@ -108,12 +115,11 @@ class GTNHNavigator extends EventEmitter {
     moves.dontCreateFlow = true;
     moves.dontMineUnderFallingBlock = true;
     moves.allow1by1towers = false;
-    moves.allowParkour = false; // Prevent risky jumps over shafts/ravines in GTNH
+    moves.allowParkour = false;
     moves.canDig = Boolean(this.options.canDigInWild);
     moves.digCost = 4;
     moves.liquidCost = 8;
 
-    // Register hazardous vanilla + modded fluids/blocks into blocksToAvoid
     for (const blockName of DEFAULT_HAZARD_BLOCK_NAMES) {
       const entry = this.bot.registry.blocksByName?.[blockName];
       if (entry) {
@@ -121,30 +127,30 @@ class GTNHNavigator extends EventEmitter {
       }
     }
 
-    // Protect chests, furnaces, and GregTech machine/cable blocks from accidental digging
     if (Array.isArray(this.bot.registry.blocksArray)) {
       for (const blk of this.bot.registry.blocksArray) {
         const lower = (blk.name || '').toLowerCase();
         if (
           lower.includes('chest') ||
+          lower.includes('shulker') ||
           lower.includes('barrel') ||
+          lower.includes('drawer') ||
           lower.includes('machine') ||
           lower.includes('casing') ||
           lower.includes('cable') ||
-          lower.includes('pipe')
+          lower.includes('wire') ||
+          lower.includes('pipe') ||
+          lower.includes('boiler') ||
+          lower.includes('hatch') ||
+          lower.includes('bus')
         ) {
           moves.blocksCantBreak.add(blk.id);
         }
       }
     }
 
-    // Exclusion step callback: pollution clouds, uninsulated live wires, adjacent lava veins, vertical shafts
     moves.exclusionAreasStep.push((block) => this.evaluateStepPenalty(block));
-
-    // Exclusion break callback: protected base structures & adjacent lava pockets
     moves.exclusionAreasBreak.push((block) => this.evaluateBreakPenalty(block));
-
-    // Exclusion place callback: never place scaffolding inside protected multiblock footprints
     moves.exclusionAreasPlace.push((block) => this.evaluatePlacePenalty(block));
 
     this.movements = moves;
@@ -156,46 +162,49 @@ class GTNHNavigator extends EventEmitter {
     return moves;
   }
 
-  /**
-   * Computes pathfinding step cost penalty for a candidate foot/body block.
-   * Returning >= 100 treats the node as impassable in mineflayer-pathfinder.
-   * @param {{ position: Vec3 }} block
-   * @returns {number}
-   */
   evaluateStepPenalty(block) {
     if (!block || !block.position) return 0;
     const pos = block.position;
     let penalty = 0;
 
-    // 1. Live uninsulated GregTech wires cause severe electrocution damage
     const key = coordKey(pos.x, pos.y, pos.z);
     const belowKey = coordKey(pos.x, pos.y - 1, pos.z);
+
+    // 1. Live uninsulated GTCEu wires cause electrocution damage
     if (this.liveWireCoords.has(key) || this.liveWireCoords.has(belowKey)) {
       return 1000;
     }
 
-    // 2. Chunk-level GTNH pollution clouds (gibbl concentration)
+    // 2. GTL Steam Exhaust Vent jet & unframed hot fluid/steam pipes cause scald damage
+    if (
+      this.steamExhaustVentCoords.has(key) ||
+      this.hotPipeCoords.has(key) ||
+      this.hotPipeCoords.has(belowKey)
+    ) {
+      return 1000;
+    }
+
+    // 3. Chunk-level environmental pollution / toxic atmosphere hazard
     const chunkX = Math.floor(pos.x / 16);
     const chunkZ = Math.floor(pos.z / 16);
     const chunkData = this.pollutedChunks.get(`${chunkX},${chunkZ}`);
     if (chunkData && chunkData.gibbl >= this.options.pollutionThresholdGibbl) {
-      // Scale above 100 when lethal (>750k gibbl), high avoidance cost between 500k-750k
       penalty += chunkData.gibbl >= 750000 ? 500 : 80;
     }
 
-    // 3. Explicit 3D pollution cloud bounding boxes
+    // 4. Explicit 3D hazard AABB zones
     for (const zone of this.pollutionZones) {
       if (isInsideAABB(pos, zone.min, zone.max)) {
         penalty += zone.penalty;
       }
     }
 
-    // 4. Lava vein proximity check
+    // 5. Lava vein proximity check
     if (this.options.lavaSafetyMargin > 0 && this.hasAdjacentLava(pos)) {
       penalty += 200;
     }
 
-    // 5. High-drop vertical shaft detection beneath non-solid blocks
+    // 6. Deep shaft drop check (supports 1.20.1 caves down to Y = -64)
     if (this.isOverDeepShaft(pos, this.options.maxDropDown + 1)) {
       return 1000;
     }
@@ -203,10 +212,6 @@ class GTNHNavigator extends EventEmitter {
     return penalty;
   }
 
-  /**
-   * Computes break penalty for candidate blocks. Protected base structures and
-   * blocks holding back lava return infinite/impassable weight.
-   */
   evaluateBreakPenalty(block) {
     if (!block || !block.position) return 0;
     const pos = block.position;
@@ -227,6 +232,13 @@ class GTNHNavigator extends EventEmitter {
   evaluatePlacePenalty(block) {
     if (!block || !block.position) return 0;
     const pos = block.position;
+    const key = coordKey(pos.x, pos.y, pos.z);
+
+    // GTL Quest 7736F74AEBCB914E / 38CC43F7A6A39BB4: NEVER obstruct a steam exhaust vent or muffler!
+    if (this.steamExhaustVentCoords.has(key)) {
+      return 1000;
+    }
+
     for (const struct of this.protectedStructures) {
       if (isInsideAABB(pos, struct.min, struct.max)) {
         return 1000;
@@ -235,31 +247,19 @@ class GTNHNavigator extends EventEmitter {
     return 0;
   }
 
-  /**
-   * Checks whether any 6-connected neighbor of `pos` is lava or flowing_lava.
-   * @param {Vec3} pos
-   * @returns {boolean}
-   */
   hasAdjacentLava(pos) {
     if (!this.bot || typeof this.bot.blockAt !== 'function') return false;
     for (const offset of CARDINAL_OFFSETS) {
       const neighbor = this.bot.blockAt(pos.plus(offset));
       if (!neighbor) continue;
       const name = (neighbor.name || '').toLowerCase();
-      if (name === 'lava' || name === 'flowing_lava') {
+      if (name === 'lava' || name === 'flowing_lava' || name === 'minecraft:lava') {
         return true;
       }
     }
     return false;
   }
 
-  /**
-   * Checks if `pos` has an unbroken vertical drop exceeding `minVoidDepth` blocks
-   * (or terminating in lava).
-   * @param {Vec3} pos
-   * @param {number} minVoidDepth
-   * @returns {boolean}
-   */
   isOverDeepShaft(pos, minVoidDepth = 4) {
     if (!this.bot || typeof this.bot.blockAt !== 'function') return false;
 
@@ -268,7 +268,12 @@ class GTNHNavigator extends EventEmitter {
     if (groundBlock && this.isSolidSupport(groundBlock)) {
       return false;
     }
-    if (footBlock && (footBlock.name === 'ladder' || footBlock.name === 'vine')) {
+    if (
+      footBlock &&
+      (footBlock.name === 'ladder' ||
+        footBlock.name === 'vine' ||
+        footBlock.name === 'scaffolding')
+    ) {
       return false;
     }
 
@@ -294,15 +299,16 @@ class GTNHNavigator extends EventEmitter {
   isSolidSupport(block) {
     if (!block) return false;
     const name = (block.name || '').toLowerCase();
-    if (name === 'air' || name === 'cave_air' || name === 'void_air') return false;
-    if (name.includes('water') || name.includes('lava')) return false;
+    if (name === 'air' || name === 'minecraft:air' || name === 'cave_air' || name === 'void_air') {
+      return false;
+    }
+    if (name.includes('water') || name.includes('lava') || name === 'powder_snow') {
+      return false;
+    }
     if (block.boundingBox) return block.boundingBox === 'block';
     return block.type !== 0;
   }
 
-  /**
-   * Records or updates pollution concentration (gibbl) for a 16x16 chunk.
-   */
   recordChunkPollution(chunkX, chunkZ, gibbl) {
     const key = `${chunkX},${chunkZ}`;
     if (gibbl <= 0) {
@@ -318,9 +324,6 @@ class GTNHNavigator extends EventEmitter {
     this.emit('pollutionUpdated', { chunkX, chunkZ, gibbl });
   }
 
-  /**
-   * Registers an explicit 3D pollution cloud AABB to avoid during pathfinding.
-   */
   addPollutionZone(id, minPos, maxPos, penalty = 500) {
     const min = toMinVec(minPos, maxPos);
     const max = toMaxVec(minPos, maxPos);
@@ -328,10 +331,6 @@ class GTNHNavigator extends EventEmitter {
     this.pollutionZones.push({ id, min, max, penalty });
   }
 
-  /**
-   * Registers a protected multiblock or base footprint AABB so pathfinder digging
-   * never breaks casings, hatches, pipes, or chests.
-   */
   registerProtectedStructure(id, minPos, maxPos) {
     const min = toMinVec(minPos, maxPos);
     const max = toMaxVec(minPos, maxPos);
@@ -350,15 +349,31 @@ class GTNHNavigator extends EventEmitter {
   }
 
   /**
-   * 3D Amanatides-Woo Voxel DDA Raycaster.
-   * Traces a ray from `origin` along `direction` up to `maxDistance` blocks and returns
-   * the first solid block intersected along with its hit face normal.
-   *
-   * @param {Vec3} origin
-   * @param {Vec3} direction - Normalized or non-zero direction vector
-   * @param {number} [maxDistance=5.0]
-   * @returns {{ block: any, position: Vec3, face: Vec3, distance: number } | null}
+   * Registers the exhaust clearance tile of a GTCEu Steam Machine or Muffler Hatch
+   * so the bot neither walks through scalding vented steam nor places blocks over it.
    */
+  registerSteamExhaustVent(machinePos, exhaustFacing = 'BACK') {
+    const base = toVec3(machinePos).floored();
+    const vec = FACING_VECTORS[String(exhaustFacing).toUpperCase()] || FACING_VECTORS.SOUTH;
+    const exhaustAirTile = base.plus(vec);
+    this.steamExhaustVentCoords.add(coordKey(exhaustAirTile.x, exhaustAirTile.y, exhaustAirTile.z));
+    return exhaustAirTile;
+  }
+
+  /**
+   * Registers a hot GTCEu fluid/steam pipe. Framed pipes in GTCEu 1.20.1 are insulated
+   * against contact burn; unframed pipes carrying steam/hot fluids are avoided.
+   */
+  registerHotFluidPipe(pos, isFramed = false) {
+    const p = toVec3(pos).floored();
+    const key = coordKey(p.x, p.y, p.z);
+    if (isFramed) {
+      this.hotPipeCoords.delete(key);
+    } else {
+      this.hotPipeCoords.add(key);
+    }
+  }
+
   raycastVoxel(origin, direction, maxDistance = 5.0) {
     if (!this.bot || typeof this.bot.blockAt !== 'function') return null;
 
@@ -432,10 +447,6 @@ class GTNHNavigator extends EventEmitter {
     return null;
   }
 
-  /**
-   * Checks whether `targetBlockPos` has unobstructed line-of-sight from `eyePos`
-   * (or the bot's current eye position).
-   */
   hasLineOfSight(targetBlockPos, eyePos = null, maxReach = 4.5) {
     const target = toVec3(targetBlockPos).floored();
     const eye = eyePos
@@ -451,7 +462,7 @@ class GTNHNavigator extends EventEmitter {
     if (dist > maxReach + 0.75) return false;
 
     const hit = this.raycastVoxel(eye, delta, dist + 0.5);
-    if (!hit) return true; // Target itself is air (e.g. placement target) and nothing obstructed ray!
+    if (!hit) return true;
     return (
       hit.position.x === target.x &&
       hit.position.y === target.y &&
@@ -459,10 +470,6 @@ class GTNHNavigator extends EventEmitter {
     );
   }
 
-  /**
-   * Computes valid collision-free standing coordinates within reach (`[1.5, maxReach]`)
-   * of `targetPos` so the bot never stands inside the block it is about to place!
-   */
   findSafePlacementStandPositions(targetPos, maxReach = 4.0) {
     const target = toVec3(targetPos).floored();
     const candidates = [];
@@ -472,7 +479,6 @@ class GTNHNavigator extends EventEmitter {
       for (let dz = -r; dz <= r; dz++) {
         for (let dy = -2; dy <= 2; dy++) {
           const stand = target.offset(dx, dy, dz);
-          // Do not overlap bot's 2-block hitbox [stand, stand + (0,1,0)] with targetPos
           if (
             stand.x === target.x &&
             stand.z === target.z &&
@@ -503,9 +509,6 @@ class GTNHNavigator extends EventEmitter {
     return candidates;
   }
 
-  /**
-   * Navigates within `range` blocks of `pos` using `mineflayer-pathfinder`.
-   */
   async gotoPosition(pos, range = 2, timeoutMs = 30000) {
     const target = toVec3(pos);
     if (!this.bot?.pathfinder) {
@@ -522,9 +525,6 @@ class GTNHNavigator extends EventEmitter {
     return this._runGoalWithTimeout(goal, timeoutMs);
   }
 
-  /**
-   * Navigates directly adjacent to an interactive block (chest, GT machine, hatch).
-   */
   async gotoBlockAdjacent(pos, timeoutMs = 30000) {
     const target = toVec3(pos).floored();
     if (!this.bot?.pathfinder) {
@@ -538,9 +538,6 @@ class GTNHNavigator extends EventEmitter {
     return this._runGoalWithTimeout(goal, timeoutMs);
   }
 
-  /**
-   * Navigates to a safe, non-overlapping placement position with clear reach to `targetPos`.
-   */
   async gotoPlacementPose(targetPos, maxReach = 4.0, timeoutMs = 30000) {
     const target = toVec3(targetPos).floored();
     if (this.bot?.entity?.position) {
@@ -578,9 +575,6 @@ class GTNHNavigator extends EventEmitter {
     return this.gotoPosition(target, 3, timeoutMs);
   }
 
-  /**
-   * Computes an escape goal moving at least `safeDistance` blocks away from a hazard/entity.
-   */
   async retreatFromPoint(hazardPos, safeDistance = 16, timeoutMs = 15000) {
     const origin = toVec3(hazardPos);
     if (!this.bot?.pathfinder) return null;
@@ -655,7 +649,9 @@ function coordKey(x, y, z) {
 
 module.exports = {
   GTNHNavigator,
+  GTLNavigator: GTNHNavigator,
   CARDINAL_OFFSETS,
+  FACING_VECTORS,
   DEFAULT_HAZARD_BLOCK_NAMES,
   toVec3,
   coordKey

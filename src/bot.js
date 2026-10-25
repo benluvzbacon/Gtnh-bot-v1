@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const mineflayer = require('mineflayer');
-const mc = require('minecraft-protocol');
 const collectBlockPlugin = require('mineflayer-collectblock').plugin;
 const toolPlugin = require('mineflayer-tool').plugin;
 const Vec3 = require('vec3');
@@ -12,7 +11,7 @@ const Vec3 = require('vec3');
 const {
   ForgeRegistryBridge,
   attachForgeHandshake,
-  DEFAULT_GTNH_MODLIST
+  DEFAULT_GTL_MODLIST
 } = require('./protocol/forgeHandshake');
 const { GTNHNavigator } = require('./navigation/gtnhNavigator');
 const {
@@ -22,52 +21,72 @@ const {
 } = require('./craftingEngine');
 const { MultiblockBuilder } = require('./multiblockBuilder');
 const { HazardMonitor } = require('./hazards/hazardMonitor');
-const { buildGTNHStateMachine } = require('./statemachine/hierarchy');
+const { buildGTLStateMachine } = require('./statemachine/hierarchy');
 
 /**
- * Resolves standard runtime configuration from options and environment variables.
+ * Resolves runtime configuration for GregTech Leisure (Minecraft 1.20.1, Forge 47.4.16).
+ * Because Mineflayer 4.39+ speaks 1.20.1 (protocol 763) natively, no external ViaProxy
+ * Java process is required — saving ~300 MB of RAM on low-end PCs!
  */
 function resolveAgentConfig(overrides = {}) {
   return {
-    host: overrides.host || process.env.GTNH_HOST || '127.0.0.1',
-    port: Number(overrides.port || process.env.GTNH_PORT || 25565),
-    username: overrides.username || process.env.GTNH_USERNAME || 'GTNH_Automaton',
-    auth: overrides.auth || process.env.GTNH_AUTH || 'offline',
-    // ViaProxy exposes 1.8.8 protocol to Mineflayer while forwarding FML|HS to 1.7.10 GTNH;
-    // '1.7.10' or '1.8.8' can be selected depending on proxy/direct topology.
-    version: overrides.version || process.env.GTNH_VERSION || '1.8.8',
-    forgeBridgeMode: overrides.forgeBridgeMode || process.env.GTNH_FORGE_MODE || 'fml_passthrough',
-    forgeModsPath: overrides.forgeModsPath || process.env.GTNH_FORGE_MODS_JSON || null,
-    registryDumpPath: overrides.registryDumpPath || process.env.GTNH_REGISTRY_DUMP_JSON || null,
+    host: overrides.host || process.env.GTL_HOST || process.env.GTNH_HOST || '127.0.0.1',
+    port: Number(overrides.port || process.env.GTL_PORT || process.env.GTNH_PORT || 25565),
+    username:
+      overrides.username ||
+      process.env.GTL_USERNAME ||
+      process.env.GTNH_USERNAME ||
+      'GTL_Automaton',
+    auth: overrides.auth || process.env.GTL_AUTH || process.env.GTNH_AUTH || 'offline',
+    version: overrides.version || process.env.GTL_VERSION || process.env.GTNH_VERSION || '1.20.1',
+    forgeBridgeMode:
+      overrides.forgeBridgeMode ||
+      process.env.GTL_FORGE_MODE ||
+      process.env.GTNH_FORGE_MODE ||
+      'fml3_native_1201',
+    forgeModsPath:
+      overrides.forgeModsPath ||
+      process.env.GTL_FORGE_MODS_JSON ||
+      process.env.GTNH_FORGE_MODS_JSON ||
+      null,
+    registryDumpPath:
+      overrides.registryDumpPath ||
+      process.env.GTL_REGISTRY_DUMP_JSON ||
+      process.env.GTNH_REGISTRY_DUMP_JSON ||
+      null,
     questDbPath:
       overrides.questDbPath ||
+      process.env.GTL_QUEST_DB_PATH ||
       process.env.GTNH_QUEST_DB_PATH ||
       path.resolve(__dirname, '../data/quest_tree_template.json'),
     blueprintsDir:
       overrides.blueprintsDir ||
+      process.env.GTL_BLUEPRINTS_DIR ||
       process.env.GTNH_BLUEPRINTS_DIR ||
       path.resolve(__dirname, '../data'),
-    unlockedVoltageTier: overrides.unlockedVoltageTier || process.env.GTNH_INITIAL_TIER || 'STEAM',
-    autoReconnect: overrides.autoReconnect ?? (process.env.GTNH_AUTO_RECONNECT !== '0'),
+    unlockedVoltageTier:
+      overrides.unlockedVoltageTier ||
+      process.env.GTL_INITIAL_TIER ||
+      process.env.GTNH_INITIAL_TIER ||
+      'STEAM',
+    autoReconnect:
+      overrides.autoReconnect ??
+      (process.env.GTL_AUTO_RECONNECT !== '0' && process.env.GTNH_AUTO_RECONNECT !== '0'),
     reconnectBaseDelayMs: Number(overrides.reconnectBaseDelayMs || 5000),
-    debugWindows:
-      overrides.debugWindows ?? (process.env.BOT_DEBUG_WINDOWS === '1')
+    debugWindows: overrides.debugWindows ?? (process.env.BOT_DEBUG_WINDOWS === '1')
   };
 }
 
 /**
- * Top-level Headless GTNH Automation Agent orchestrating:
- *  - Forge 1.7.10 (`FML|HS`) protocol handshake & dynamic numeric-ID registry mapping
- *  - Hazard-hardened 1.7.10 spatial navigation (`GTNHNavigator`)
- *  - BetterQuesting & JEI DAG crafting engine + packet GUI slot clicker (`CraftingEngine`)
- *  - 3D schematic multiblock printer (`MultiblockBuilder`)
- *  - Rain/Over-voltage, EU Battery Buffer, Pollution & Infernal Mob mitigation (`HazardMonitor`)
+ * Top-level Headless GregTech Leisure (GTL) Automation Agent orchestrating:
+ *  - Forge 1.20.1 (`FML3` / `fml:loginwrapper` / `fml:handshake`) protocol handshake & registry sync
+ *  - Hazard-hardened 1.20.1 spatial navigation (`GTLNavigator` — steam vents, hot pipes, Y=-64 shafts)
+ *  - FTB Quests & GTCEu/KubeJS DAG crafting engine + 1.20.1 LDLib packet GUI controller (`CraftingEngine`)
+ *  - 3D schematic multiblock printer with `gtceu:duct_tape` Maintenance Hatch servicing (`MultiblockBuilder`)
+ *  - Dry-boiler explosion guard, MAE2 EU P2P over-voltage check, & 2x low-EU drain hysteresis (`HazardMonitor`)
  *  - 3-tier Hierarchical State Machine (`mineflayer-statemachine`)
  */
-class GTNHAutomationAgent extends EventEmitter {
-  /**
-   * @param {Object} [configOverrides]
-   */
+class GTLAutomationAgent extends EventEmitter {
   constructor(configOverrides = {}) {
     super();
     this.config = resolveAgentConfig(configOverrides);
@@ -76,7 +95,7 @@ class GTNHAutomationAgent extends EventEmitter {
     this.warehouse = new WarehouseTracker({ registryBridge: this.registryBridge });
     this.containerController = new ContainerPacketController(null, {
       registryBridge: this.registryBridge,
-      clickDelayMs: configOverrides.clickDelayMs ?? 65
+      clickDelayMs: configOverrides.clickDelayMs ?? 55
     });
     this.craftingEngine = new CraftingEngine({
       registryBridge: this.registryBridge,
@@ -99,10 +118,6 @@ class GTNHAutomationAgent extends EventEmitter {
     this._loadStaticAssets();
   }
 
-  /**
-   * Loads optional NEI numeric ID dumps, the Quest Book + JEI DAG database,
-   * and all 3D multiblock JSON schematics from `/data`.
-   */
   _loadStaticAssets() {
     if (this.config.registryDumpPath && fs.existsSync(this.config.registryDumpPath)) {
       const dump = JSON.parse(fs.readFileSync(this.config.registryDumpPath, 'utf8'));
@@ -126,7 +141,7 @@ class GTNHAutomationAgent extends EventEmitter {
         const fullPath = path.join(this.config.blueprintsDir, file);
         try {
           const raw = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-          if (raw && (raw.blueprintId || raw.layers || raw.voxels)) {
+          if (raw && (raw.blueprintId || raw.blocks || raw.layers || raw.voxels)) {
             this.multiblockBuilder.registerBlueprint(raw);
           }
         } catch (err) {
@@ -139,73 +154,44 @@ class GTNHAutomationAgent extends EventEmitter {
     }
   }
 
-  /**
-   * Resolves the Forge mod list to advertise during `FML|HS` negotiation.
-   */
   _loadForgeModList() {
     if (this.config.forgeModsPath && fs.existsSync(this.config.forgeModsPath)) {
       return JSON.parse(fs.readFileSync(this.config.forgeModsPath, 'utf8'));
     }
-    return DEFAULT_GTNH_MODLIST;
+    return DEFAULT_GTL_MODLIST;
   }
 
   /**
-   * Boots and wires the agent onto either a live network connection (`connect()`)
-   * or an injected Mineflayer-compatible `bot` instance (`attachBot(bot)`).
+   * Connects directly to a GregTech Leisure 1.20.1 server or Open-to-LAN instance
+   * using native Mineflayer 1.20.1 + Forge `FML3` (`fml:loginwrapper`) handshake.
    */
   connect() {
     this._shuttingDown = false;
     const forgeMods = this._loadForgeModList();
 
-    let botInstance;
-    if (this.config.forgeBridgeMode === 'direct_1710_client') {
-      // Create raw 1.7 protocol client with FML|HS handshake attached before play transition
-      const rawClient = mc.createClient({
-        host: this.config.host,
-        port: this.config.port,
-        username: this.config.username,
-        auth: this.config.auth,
-        version: '1.7'
-      });
-      this.fmlSession = attachForgeHandshake(rawClient, {
-        forgeMods,
-        registryBridge: this.registryBridge
-      });
-      botInstance = mineflayer.createBot({
-        client: rawClient,
-        version: '1.8.8'
-      });
-    } else {
-      // Standard Mineflayer client with FML|HS plugin channel attached (e.g. ViaProxy FML passthrough)
-      botInstance = mineflayer.createBot({
-        host: this.config.host,
-        port: this.config.port,
-        username: this.config.username,
-        auth: this.config.auth,
-        version: this.config.version
-      });
-    }
+    const botInstance = mineflayer.createBot({
+      host: this.config.host,
+      port: this.config.port,
+      username: this.config.username,
+      auth: this.config.auth,
+      version: this.config.version
+    });
 
     return this.attachBot(botInstance, { forgeMods });
   }
 
-  /**
-   * Attaches all GTNH subsystems, packet listeners, sensors, and the hierarchical
-   * state machine onto a Mineflayer `bot` instance.
-   */
   attachBot(bot, options = {}) {
     this.bot = bot;
 
-    // 1. Attach Forge FML|HS handshake listener onto underlying protocol client
     if (!this.fmlSession && bot._client) {
       this.fmlSession = attachForgeHandshake(bot._client, {
         forgeMods: options.forgeMods || this._loadForgeModList(),
         registryBridge: this.registryBridge,
+        autoMirrorServerMods: options.autoMirrorServerMods !== false,
         useAutoVersionForge: Boolean(options.useAutoVersionForge)
       });
     }
 
-    // 2. Load Mineflayer utility plugins if supported by bot instance
     if (typeof bot.loadPlugin === 'function' && bot.registry) {
       try {
         bot.loadPlugin(toolPlugin);
@@ -215,15 +201,12 @@ class GTNHAutomationAgent extends EventEmitter {
       }
     }
 
-    // 3. Initialize GTNH spatial navigator (lava veins, shaft drops, pollution exclusion zones)
     this.navigator = new GTNHNavigator(bot, options.navigatorOptions || {});
 
-    // 4. Bind ContainerPacketController & MultiblockBuilder to live bot + navigator
     this.containerController.attachToBot(bot);
     this.multiblockBuilder.bot = bot;
     this.multiblockBuilder.navigator = this.navigator;
 
-    // 5. Initialize GTNH Volatility & Hazard Monitor (Rain/Storm, EU Buffers, Pollution, Mobs)
     this.hazardMonitor = new HazardMonitor({
       bot,
       navigator: this.navigator,
@@ -232,7 +215,6 @@ class GTNHAutomationAgent extends EventEmitter {
 
     this._bindWorldAndTelemetryListeners(bot);
 
-    // 6. Initialize 3-Tier Hierarchical State Machine on spawn (or immediately if requested)
     if (options.startStateMachineImmediately) {
       this._initStateMachine(options.stateMachineOptions);
     } else if (typeof bot.once === 'function') {
@@ -248,7 +230,7 @@ class GTNHAutomationAgent extends EventEmitter {
 
   _initStateMachine(smOptions = {}) {
     if (this.stateMachineBundle) return this.stateMachineBundle;
-    this.stateMachineBundle = buildGTNHStateMachine({
+    this.stateMachineBundle = buildGTLStateMachine({
       bot: this.bot,
       navigator: this.navigator,
       craftingEngine: this.craftingEngine,
@@ -265,7 +247,7 @@ class GTNHAutomationAgent extends EventEmitter {
       bot._client.on('open_window', (pkt) => {
         this.emit('log', {
           level: 'debug',
-          message: `[WindowCalibration] Opened windowId=${pkt.windowId} type=${pkt.inventoryType} title=${pkt.windowTitle} slots=${pkt.slotCount}`
+          message: `[WindowCalibration] Opened windowId=${pkt.windowId} type=${pkt.inventoryType} title=${pkt.windowTitle}`
         });
       });
     }
@@ -277,10 +259,17 @@ class GTNHAutomationAgent extends EventEmitter {
       });
     });
 
+    this.hazardMonitor.on('dryBoilerWarning', (boiler) => {
+      this.emit('log', {
+        level: 'warn',
+        message: `[HazardMonitor] DRY STEAM BOILER '${boiler.id}' at ${boiler.temperatureC}C! Blocking water fill until <95C to prevent explosion.`
+      });
+    });
+
     this.hazardMonitor.on('powerCritical', (tel) => {
       this.emit('log', {
         level: 'warn',
-        message: `[HazardMonitor] CRITICAL EU DROP (${(tel.fillRatio * 100).toFixed(1)}% / ${tel.storedEu} EU). Active EU crafting halted!`
+        message: `[HazardMonitor] CRITICAL EU DROP (${(tel.fillRatio * 100).toFixed(1)}% / ${tel.storedEu} EU). Halting EU recipes to prevent GTL 2x low-energy progress drain!`
       });
     });
 
@@ -294,21 +283,21 @@ class GTNHAutomationAgent extends EventEmitter {
     this.hazardMonitor.on('pollutionHazard', (info) => {
       this.emit('log', {
         level: 'warn',
-        message: `[HazardMonitor] GTNH Pollution debuffs [${info.effects.join(',')}] detected! Retreating to clean chunk ${info.escapeTarget}.`
+        message: `[HazardMonitor] Environmental debuffs [${info.effects.join(',')}] detected! Retreating to clean chunk ${info.escapeTarget}.`
       });
     });
 
     if (typeof bot.on === 'function') {
       bot.on('kicked', (reason) => {
-        this.emit('log', { level: 'error', message: `[ForgeClient] Kicked: ${reason}` });
+        this.emit('log', { level: 'error', message: `[Forge1201] Kicked: ${reason}` });
       });
 
       bot.on('error', (err) => {
-        this.emit('log', { level: 'error', message: `[ForgeClient] Network error: ${err.message}` });
+        this.emit('log', { level: 'error', message: `[Forge1201] Network error: ${err.message}` });
       });
 
       bot.on('end', (reason) => {
-        this.emit('log', { level: 'warn', message: `[ForgeClient] Disconnected (${reason || 'end'})` });
+        this.emit('log', { level: 'warn', message: `[Forge1201] Disconnected (${reason || 'end'})` });
         this.stateMachineBundle = null;
         if (!this._shuttingDown && this.config.autoReconnect) {
           this._scheduleReconnect();
@@ -323,7 +312,7 @@ class GTNHAutomationAgent extends EventEmitter {
     const delay = Math.min(60000, this.config.reconnectBaseDelayMs * Math.pow(1.5, this._reconnectAttempts - 1));
     this.emit('log', {
       level: 'info',
-      message: `[ForgeClient] Reconnecting in ${Math.round(delay)}ms (attempt #${this._reconnectAttempts})...`
+      message: `[Forge1201] Reconnecting in ${Math.round(delay)}ms (attempt #${this._reconnectAttempts})...`
     });
     this._reconnectTimer = setTimeout(() => {
       if (!this._shuttingDown) {
@@ -332,9 +321,6 @@ class GTNHAutomationAgent extends EventEmitter {
     }, delay);
   }
 
-  /**
-   * Gracefully stops pathfinding, clears timers, and closes the network session.
-   */
   shutdown() {
     this._shuttingDown = true;
     if (this._reconnectTimer) {
@@ -345,55 +331,71 @@ class GTNHAutomationAgent extends EventEmitter {
       this.navigator.stop();
     }
     if (this.bot && typeof this.bot.quit === 'function') {
-      this.bot.quit('GTNH Bot graceful shutdown');
+      this.bot.quit('GTL Bot graceful shutdown');
     }
   }
 }
 
 /**
  * Executes an offline headless verification & diagnostics pass (`npm run dry-run`),
- * proving all subsystems (Quest Book DAG, LV Circuit dependency resolution, 3x3x4 PBF
- * blueprint parser, Programmed Circuit #14 packet simulator, and Hazard Monitor) work together.
+ * proving all GregTech Leisure 1.20.1 subsystems (FTB Quests DAG, LV Electronic Circuit
+ * & GTL Cheap LV Control Circuit resolution, PBF/EBF/Large Steam Circuit Assembler
+ * blueprints, and Hazard Monitor) work together cleanly with <60 MB RAM.
  */
 async function runHeadlessDryRun() {
-  const agent = new GTNHAutomationAgent({ autoReconnect: false });
+  const agent = new GTLAutomationAgent({ autoReconnect: false });
   agent.craftingEngine.setUnlockedVoltageTier('LV');
 
-  // Seed sample warehouse chest at (104, 64, 98) with partial GTNH intermediates
+  // Seed sample Sophisticated Storage barrel at (104, 64, 98) with partial GTL intermediates
   agent.warehouse.upsertContainer(
     new Vec3(104, 64, 98),
     {
-      'gregtech:gt.metaitem.01:32705': 1, // 1x Vacuum Tube already in storage
-      'gregtech:gt.metaitem.01:11305': 4, // 4x Steel Ingot
-      'gregtech:gt.metaitem.01:11035': 10 // 10x Copper Ingot
+      'gtceu:vacuum_tube': 1,
+      'gtceu:steel_ingot': 4,
+      'minecraft:copper_ingot': 10,
+      'fluid:gtceu:glue': 200
     },
-    { containerType: 'iron_chest' }
+    { containerType: 'sophisticatedstorage:netherite_shulker_box' }
   );
 
   const lvCircuitPlan = agent.craftingEngine.resolveCraftingPlan(
-    'gregtech:gt.metaitem.01:32700',
+    'gtceu:basic_electronic_circuit',
     1,
     { originPos: new Vec3(100, 64, 100) }
   );
 
+  const gtlControlCircuitPlan = agent.craftingEngine.resolveCraftingPlan(
+    'kubejs:advanced_control_circuit',
+    2,
+    { originPos: new Vec3(100, 64, 100) }
+  );
+
   const pbfBlueprint = agent.multiblockBuilder.blueprints.get('primitive_blast_furnace');
+  const ebfBlueprint = agent.multiblockBuilder.blueprints.get('electric_blast_furnace');
   const questOrder = agent.craftingEngine.getTopologicalQuestOrder();
 
   const report = {
     status: 'OK',
+    modpack: 'GregTech Leisure (GTL) 1.4.5.x — Minecraft 1.20.1 / Forge 47.4.16',
     erasLoaded: agent.craftingEngine.eras.map((e) => e.eraId),
     questsTopologicalOrder: questOrder.map((q) => q.questId),
     blueprintsLoaded: Array.from(agent.multiblockBuilder.blueprints.keys()),
     pbfBillOfMaterials: pbfBlueprint ? pbfBlueprint.billOfMaterials : {},
-    sampleLvCircuitPlan: {
+    ebfBillOfMaterials: ebfBlueprint ? ebfBlueprint.billOfMaterials : {},
+    sampleBasicElectronicCircuitPlan: {
       targetItemId: lvCircuitPlan.targetItemId,
       stepsCount: lvCircuitPlan.steps.length,
       rawMaterials: lvCircuitPlan.rawMaterials,
       warehouseWithdrawalsCount: lvCircuitPlan.warehouseWithdrawals.length
+    },
+    sampleGtlCheapLvCircuitPlan: {
+      targetItemId: gtlControlCircuitPlan.targetItemId,
+      stepsCount: gtlControlCircuitPlan.steps.length,
+      rawMaterials: gtlControlCircuitPlan.rawMaterials
     }
   };
 
-  console.log('[GTNH-Bot Dry Run] Framework Verification Complete:');
+  console.log('[GTL-Bot Dry Run] GregTech Leisure 1.20.1 Verification Complete:');
   console.log(JSON.stringify(report, null, 2));
   return report;
 }
@@ -402,18 +404,18 @@ if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.includes('--dry-run')) {
     runHeadlessDryRun().catch((err) => {
-      console.error('[GTNH-Bot Dry Run] Fatal Error:', err);
+      console.error('[GTL-Bot Dry Run] Fatal Error:', err);
       process.exitCode = 1;
     });
   } else {
-    const agent = new GTNHAutomationAgent();
+    const agent = new GTLAutomationAgent();
     agent.on('log', (entry) => {
       const fn = entry.level === 'error' ? console.error : console.log;
       fn(`${new Date().toISOString()} [${entry.level.toUpperCase()}] ${entry.message}`);
     });
 
     process.on('SIGINT', () => {
-      console.log('\nReceived SIGINT — shutting down GTNH Automation Agent...');
+      console.log('\nReceived SIGINT — shutting down GTL Automation Agent...');
       agent.shutdown();
       process.exit(0);
     });
@@ -423,14 +425,15 @@ if (require.main === module) {
     });
 
     console.log(
-      `Booting GTNH Headless Agent -> ${agent.config.host}:${agent.config.port} as '${agent.config.username}' (mode=${agent.config.forgeBridgeMode})...`
+      `Booting GregTech Leisure Headless Agent -> ${agent.config.host}:${agent.config.port} as '${agent.config.username}' (MC ${agent.config.version} / ${agent.config.forgeBridgeMode})...`
     );
     agent.connect();
   }
 }
 
 module.exports = {
-  GTNHAutomationAgent,
+  GTLAutomationAgent,
+  GTNHAutomationAgent: GTLAutomationAgent,
   resolveAgentConfig,
   runHeadlessDryRun
 };

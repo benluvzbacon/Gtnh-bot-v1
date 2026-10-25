@@ -5,11 +5,12 @@ const { CraftingEngine } = require('../craftingEngine');
 
 if (require.main === module) {
   const args = process.argv.slice(2);
-  const targetItem = args[0] || 'gregtech:gt.metaitem.01:32700';
+  const targetItem = args[0] || 'gtceu:basic_electronic_circuit';
   const count = Number(args[1] || 1);
   const tier = args[2] || 'LV';
 
   const dbPath =
+    process.env.GTL_QUEST_DB_PATH ||
     process.env.GTNH_QUEST_DB_PATH ||
     path.resolve(__dirname, '../../data/quest_tree_template.json');
 
@@ -23,6 +24,7 @@ if (require.main === module) {
         targetItemId: plan.targetItemId,
         requestedCount: plan.requestedCount,
         unlockedVoltageTier: plan.unlockedVoltageTier,
+        currentDimension: plan.currentDimension,
         totalEuRequired: plan.totalEuRequired,
         totalDurationTicks: plan.totalDurationTicks,
         rawMaterials: plan.rawMaterials,
@@ -33,6 +35,7 @@ if (require.main === module) {
           circuit: s.programmedCircuit,
           batches: s.batches,
           inputs: s.inputs,
+          fluidInputs: s.fluidInputs,
           outputs: s.outputs
         }))
       },

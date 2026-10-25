@@ -1,7 +1,7 @@
 {
   "name": "gtnh-bot-v1",
-  "version": "1.0.0",
-  "description": "Headless Mineflayer automation framework, DAG crafting engine, 3D multiblock builder, and volatility mitigation agent for GregTech: New Horizons (Forge 1.7.10).",
+  "version": "2.0.0",
+  "description": "Low-End PC Modpack Optimizer & Headless Mineflayer 1.20.1 Automation Agent (FTB Quests DAG, GTCEu Modern GUI controller, 3D Multiblock Builder, and Volatility Monitor) trained on GregTech Leisure (GTL).",
   "main": "src/bot.js",
   "type": "commonjs",
   "engines": {
@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node src/bot.js",
     "dry-run": "node src/bot.js --dry-run",
+    "optimize-pack": "node src/cli/optimizeModpack.js",
     "ingest": "node src/cli/ingestData.js",
+    "ingest-data": "node src/cli/ingestData.js",
     "plan": "node src/cli/planCraft.js",
     "validate-blueprint": "node src/cli/validateBlueprint.js",
     "test": "node --test test/*.test.js"
@@ -18,9 +20,11 @@
   "keywords": [
     "minecraft",
     "mineflayer",
-    "gtnh",
-    "gregtech-new-horizons",
-    "forge-1.7.10",
+    "gregtech-leisure",
+    "gtl",
+    "gtceu-modern",
+    "forge-1.20.1",
+    "low-end-pc-optimizer",
     "dag-crafting",
     "multiblock-builder",
     "state-machine",

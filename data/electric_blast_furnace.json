@@ -1,164 +1,118 @@
 {
-  "schemaVersion": "1.0.0",
   "blueprintId": "electric_blast_furnace",
-  "displayName": "Electric Blast Furnace (Cupronickel Dual-LV Setup)",
-  "modpack": "GregTech: New Horizons",
+  "name": "GregTech Leisure Electric Blast Furnace (Dual-LV Overclock)",
+  "modpack": "GregTech Leisure (GTL)",
+  "mcVersion": "1.20.1",
   "era": "LV_TIER",
-  "dimensions": {
-    "width": 3,
-    "height": 4,
-    "depth": 3
-  },
-  "canonicalFacing": "NORTH",
-  "anchorGridIndex": {
-    "x": 1,
-    "y": 0,
-    "z": 0
+  "dimensions": { "width": 3, "height": 4, "depth": 3 },
+  "controllerAnchor": { "x": 0, "y": 0, "z": 0 },
+  "defaultFacing": "NORTH",
+  "description": "3x4x3 Heatproof Invar Casing + 16x Cupronickel Coil multiblock relative to EBF Controller at (0, 0, 0) on the bottom front center. Includes 2x LV Energy Input Hatches (enabling 128 EU/t MV Aluminium/Silicon smelting), Maintenance Hatch (serviced automatically with gtceu:duct_tape), LV Input/Output Buses, LV Fluid Input Hatch, and top-center LV Muffler Hatch facing UP into unobstructed air.",
+  "formationCheck": {
+    "controllerOffset": { "x": 0, "y": 0, "z": 0 },
+    "nbtCompleteKey": "isFormed",
+    "expectedValue": 1,
+    "requiresMaintenanceFix": true,
+    "maintenanceHatchOffset": { "x": -1, "y": 0, "z": 0 },
+    "serviceItemId": "gtceu:duct_tape"
   },
   "palette": {
-    "C": {
-      "itemId": "gregtech:gt.blockmachines:1000",
-      "blockName": "gt.blockmachines",
-      "metadata": 1000,
-      "role": "controller",
-      "facing": "front",
-      "sneakPlace": true,
-      "label": "Electric Blast Furnace Controller"
+    "CONTROLLER": {
+      "itemId": "gtceu:electric_blast_furnace",
+      "label": "Electric Blast Furnace Controller",
+      "requiresWrenchOrientation": true,
+      "facing": "FRONT"
     },
-    "H": {
-      "itemId": "gregtech:gt.blockcasings:11",
-      "blockName": "gt.blockcasings",
-      "metadata": 11,
-      "role": "casing",
-      "sneakPlace": false,
-      "label": "Heat Proof Machine Casing"
+    "CASING": {
+      "itemId": "gtceu:heatproof_machine_casing",
+      "label": "Heatproof Invar Machine Casing"
     },
-    "K": {
-      "itemId": "gregtech:gt.blockcasings5:0",
-      "blockName": "gt.blockcasings5",
-      "metadata": 0,
-      "role": "coil",
-      "sneakPlace": false,
-      "label": "Cupronickel Coil Block"
+    "COIL": {
+      "itemId": "gtceu:cupronickel_coil_block",
+      "label": "Cupronickel Coil Block (1800K)"
     },
-    "B": {
-      "itemId": "gregtech:gt.blockmachines:71",
-      "blockName": "gt.blockmachines",
-      "metadata": 71,
-      "role": "input_bus",
-      "facing": "west",
-      "sneakPlace": true,
-      "label": "LV Input Bus"
+    "MAINTENANCE_HATCH": {
+      "itemId": "gtceu:maintenance_hatch",
+      "label": "Maintenance Hatch",
+      "requiresWrenchOrientation": true,
+      "facing": "FRONT"
     },
-    "I": {
-      "itemId": "gregtech:gt.blockmachines:51",
-      "blockName": "gt.blockmachines",
-      "metadata": 51,
-      "role": "input_hatch",
-      "facing": "west",
-      "sneakPlace": true,
-      "label": "LV Input Hatch"
+    "INPUT_BUS": {
+      "itemId": "gtceu:lv_input_bus",
+      "label": "LV Input Bus",
+      "requiresWrenchOrientation": true,
+      "facing": "FRONT"
     },
-    "O": {
-      "itemId": "gregtech:gt.blockmachines:81",
-      "blockName": "gt.blockmachines",
-      "metadata": 81,
-      "role": "output_bus",
-      "facing": "east",
-      "sneakPlace": true,
-      "label": "LV Output Bus"
+    "OUTPUT_BUS": {
+      "itemId": "gtceu:lv_output_bus",
+      "label": "LV Output Bus",
+      "requiresWrenchOrientation": true,
+      "facing": "LEFT"
     },
-    "M": {
-      "itemId": "gregtech:gt.blockmachines:90",
-      "blockName": "gt.blockmachines",
-      "metadata": 90,
-      "role": "maintenance_hatch",
-      "facing": "front",
-      "sneakPlace": true,
-      "label": "Maintenance Hatch"
+    "INPUT_HATCH": {
+      "itemId": "gtceu:lv_input_hatch",
+      "label": "LV Fluid Input Hatch",
+      "requiresWrenchOrientation": true,
+      "facing": "RIGHT"
     },
-    "E": {
-      "itemId": "gregtech:gt.blockmachines:41",
-      "blockName": "gt.blockmachines",
-      "metadata": 41,
-      "role": "energy_hatch",
-      "facing": "back",
-      "voltageTier": "LV",
-      "sneakPlace": true,
-      "label": "LV Energy Hatch"
+    "ENERGY_HATCH": {
+      "itemId": "gtceu:lv_energy_input_hatch",
+      "label": "LV Energy Input Hatch (2A)",
+      "requiresWrenchOrientation": true,
+      "facing": "BACK"
     },
-    "U": {
-      "itemId": "gregtech:gt.blockmachines:91",
-      "blockName": "gt.blockmachines",
-      "metadata": 91,
-      "role": "muffler_hatch",
-      "facing": "up",
-      "sneakPlace": true,
-      "label": "LV Muffler Hatch"
+    "MUFFLER_HATCH": {
+      "itemId": "gtceu:lv_muffler_hatch",
+      "label": "LV Muffler Hatch",
+      "requiresWrenchOrientation": true,
+      "facing": "UP",
+      "requiresAirClearanceAbove": true
     },
-    ".": {
-      "itemId": "minecraft:air:0",
-      "blockName": "air",
-      "metadata": 0,
-      "role": "air",
-      "label": "Interior Hollow Cavity (Air)"
+    "AIR": {
+      "itemId": "minecraft:air",
+      "label": "Interior Coil Cavity Air",
+      "mustBeAir": true
     }
   },
-  "layers": [
-    {
-      "yIndex": 0,
-      "relativeY": 0,
-      "description": "Bottom casing & hatch layer (Controller front-center at [0,0,0], Maintenance, Buses, Energy Hatches)",
-      "matrix": [
-        ["M", "C", "H"],
-        ["B", "H", "O"],
-        ["E", "I", "E"]
-      ]
-    },
-    {
-      "yIndex": 1,
-      "relativeY": 1,
-      "description": "Lower heating coil ring (8 Cupronickel Coils, hollow center)",
-      "matrix": [
-        ["K", "K", "K"],
-        ["K", ".", "K"],
-        ["K", "K", "K"]
-      ]
-    },
-    {
-      "yIndex": 2,
-      "relativeY": 2,
-      "description": "Upper heating coil ring (8 Cupronickel Coils, hollow center)",
-      "matrix": [
-        ["K", "K", "K"],
-        ["K", ".", "K"],
-        ["K", "K", "K"]
-      ]
-    },
-    {
-      "yIndex": 3,
-      "relativeY": 3,
-      "description": "Top Heat Proof Casing cap with center Muffler Hatch facing sky",
-      "matrix": [
-        ["H", "H", "H"],
-        ["H", "U", "H"],
-        ["H", "H", "H"]
-      ]
-    }
-  ],
-  "gtnhConstraints": {
-    "minCasings": 9,
-    "requiredRoles": [
-      "controller",
-      "casing",
-      "coil",
-      "input_bus",
-      "output_bus",
-      "maintenance_hatch",
-      "energy_hatch",
-      "muffler_hatch"
-    ],
-    "requiresMaintenance": true,
-    "openChimneyRelativeOffset": { "x": 0, "y": 4, "z": 1 }
-  }
+  "blocks": [
+    { "x": -1, "y": 0, "z": 0,  "role": "MAINTENANCE_HATCH" },
+    { "x": 0,  "y": 0, "z": 0,  "role": "CONTROLLER" },
+    { "x": 1,  "y": 0, "z": 0,  "role": "INPUT_BUS" },
+    { "x": -1, "y": 0, "z": -1, "role": "OUTPUT_BUS" },
+    { "x": 0,  "y": 0, "z": -1, "role": "CASING" },
+    { "x": 1,  "y": 0, "z": -1, "role": "INPUT_HATCH" },
+    { "x": -1, "y": 0, "z": -2, "role": "ENERGY_HATCH" },
+    { "x": 0,  "y": 0, "z": -2, "role": "CASING" },
+    { "x": 1,  "y": 0, "z": -2, "role": "ENERGY_HATCH" },
+
+    { "x": -1, "y": 1, "z": 0,  "role": "COIL" },
+    { "x": 0,  "y": 1, "z": 0,  "role": "COIL" },
+    { "x": 1,  "y": 1, "z": 0,  "role": "COIL" },
+    { "x": -1, "y": 1, "z": -1, "role": "COIL" },
+    { "x": 0,  "y": 1, "z": -1, "role": "AIR" },
+    { "x": 1,  "y": 1, "z": -1, "role": "COIL" },
+    { "x": -1, "y": 1, "z": -2, "role": "COIL" },
+    { "x": 0,  "y": 1, "z": -2, "role": "COIL" },
+    { "x": 1,  "y": 1, "z": -2, "role": "COIL" },
+
+    { "x": -1, "y": 2, "z": 0,  "role": "COIL" },
+    { "x": 0,  "y": 2, "z": 0,  "role": "COIL" },
+    { "x": 1,  "y": 2, "z": 0,  "role": "COIL" },
+    { "x": -1, "y": 2, "z": -1, "role": "COIL" },
+    { "x": 0,  "y": 2, "z": -1, "role": "AIR" },
+    { "x": 1,  "y": 2, "z": -1, "role": "COIL" },
+    { "x": -1, "y": 2, "z": -2, "role": "COIL" },
+    { "x": 0,  "y": 2, "z": -2, "role": "COIL" },
+    { "x": 1,  "y": 2, "z": -2, "role": "COIL" },
+
+    { "x": -1, "y": 3, "z": 0,  "role": "CASING" },
+    { "x": 0,  "y": 3, "z": 0,  "role": "CASING" },
+    { "x": 1,  "y": 3, "z": 0,  "role": "CASING" },
+    { "x": -1, "y": 3, "z": -1, "role": "CASING" },
+    { "x": 0,  "y": 3, "z": -1, "role": "MUFFLER_HATCH" },
+    { "x": 1,  "y": 3, "z": -1, "role": "CASING" },
+    { "x": -1, "y": 3, "z": -2, "role": "CASING" },
+    { "x": 0,  "y": 3, "z": -2, "role": "CASING" },
+    { "x": 1,  "y": 3, "z": -2, "role": "CASING" }
+  ]
 }

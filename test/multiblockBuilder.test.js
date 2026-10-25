@@ -11,23 +11,18 @@ const { MultiblockBuilder } = require('../src/multiblockBuilder');
 
 const PBF_PATH = path.resolve(__dirname, '../data/primitive_blast_furnace.json');
 const EBF_PATH = path.resolve(__dirname, '../data/electric_blast_furnace.json');
+const LSCA_PATH = path.resolve(__dirname, '../data/large_steam_circuit_assembler.json');
 const DB_PATH = path.resolve(__dirname, '../data/quest_tree_template.json');
 
-/**
- * Creates an in-memory 3D voxel world + mock Mineflayer bot for live-testing
- * `MultiblockBuilder` block scanning, excavation, and `block_place` packet emission.
- */
 function createVirtualVoxelBot() {
   const voxels = new Map();
   const key = (p) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
 
-  // Lay solid stone ground at y <= 62
   for (let x = 90; x <= 115; x++) {
     for (let z = 90; z <= 115; z++) {
       voxels.set(`${x},62,${z}`, {
         type: 1,
         name: 'stone',
-        metadata: 0,
         boundingBox: 'block',
         position: new Vec3(x, 62, z)
       });
@@ -43,7 +38,7 @@ function createVirtualVoxelBot() {
 
   const bot = new EventEmitter();
   bot._client = client;
-  bot.entity = { id: 1, position: new Vec3(100, 63, 97) };
+  bot.entity = { id: 1, position: new Vec3(100, 63, 102) };
   bot.inventoryItems = [];
   bot.inventory = {
     items: () => bot.inventoryItems
@@ -54,7 +49,6 @@ function createVirtualVoxelBot() {
       voxels.get(key(p)) || {
         type: 0,
         name: 'air',
-        metadata: 0,
         boundingBox: 'empty',
         position: p
       }
@@ -72,9 +66,7 @@ function createVirtualVoxelBot() {
     const p = targetPos.floored();
     voxels.set(key(p), {
       type: 500,
-      name: cell.blockName,
-      metadata: cell.metadata,
-      canonicalId: cell.itemId,
+      name: cell.itemId,
       boundingBox: 'block',
       position: p
     });
@@ -83,25 +75,27 @@ function createVirtualVoxelBot() {
   return { bot, voxels, packets, sneakHistory, key };
 }
 
-test('MultiblockBuilder parses 3x3x4 Primitive Blast Furnace & Electric Blast Furnace blueprints and rotates across all 4 facings', () => {
+test('MultiblockBuilder parses GTL 1.20.1 PBF, Dual-LV EBF, and Large Steam Circuit Assembler blueprints and rotates across facings', () => {
   const builder = new MultiblockBuilder();
   const pbf = builder.loadBlueprintFromFile(PBF_PATH);
   const ebf = builder.loadBlueprintFromFile(EBF_PATH);
+  const lsca = builder.loadBlueprintFromFile(LSCA_PATH);
 
-  assert.equal(pbf.voxels.length, 36, '3x3x4 grid has 36 total voxel cells');
-  assert.equal(pbf.roleCounts.casing, 30, 'PBF requires 30 Firebricks');
+  assert.equal(pbf.voxels.length, 36, '3x4x3 PBF grid has 36 total voxel cells');
+  assert.equal(pbf.roleCounts.firebrick, 32, 'Standard PBF uses 32 gtceu:firebricks');
   assert.equal(pbf.roleCounts.controller, 1);
-  assert.equal(pbf.roleCounts.input_hatch, 1);
-  assert.equal(pbf.roleCounts.output_hatch, 1);
   assert.equal(pbf.roleCounts.air, 3, 'PBF has 3 vertical interior air blocks');
 
-  assert.equal(ebf.roleCounts.energy_hatch, 2, 'Dual-LV Energy Hatch EBF setup');
+  assert.equal(ebf.roleCounts.energy_hatch, 2, 'GTL Dual-LV Energy Hatch EBF setup for MV overclock');
   assert.equal(ebf.roleCounts.maintenance_hatch, 1);
   assert.equal(ebf.roleCounts.muffler_hatch, 1);
   assert.equal(ebf.roleCounts.coil, 16);
 
-  // Verify 90-degree EAST rotation transforms West Input Hatch (-1, 0, 1) -> (-1, 0, -1) facing NORTH
-  const projEast = builder.projectToWorld(pbf, new Vec3(100, 64, 100), 'EAST');
+  assert.equal(lsca.voxels.length, 27, 'GTL Large Steam Circuit Assembler is 3x3x3');
+  assert.equal(lsca.roleCounts.steam_input_hatch, 1);
+  assert.equal(lsca.roleCounts.ulv_fluid_hatch, 1);
+
+  const projEast = builder.projectToWorld(ebf, new Vec3(100, 64, 100), 'EAST');
   const controllerCell = projEast.cells.find((c) => c.role === 'controller');
   assert.deepEqual(
     [controllerCell.worldPos.x, controllerCell.worldPos.y, controllerCell.worldPos.z],
@@ -109,15 +103,12 @@ test('MultiblockBuilder parses 3x3x4 Primitive Blast Furnace & Electric Blast Fu
     'Controller always remains pinned at master anchor [100, 64, 100]'
   );
   assert.equal(controllerCell.worldFacing, 'EAST');
-
-  const inputHatchCell = projEast.cells.find((c) => c.role === 'input_hatch');
-  assert.equal(inputHatchCell.worldFacing, 'NORTH');
 });
 
-test('MultiblockBuilder pauses when specialized GTNH hatches/casings are missing, passes missing IDs to CraftingEngine, and completes 3x3x4 PBF on resume', async () => {
+test('MultiblockBuilder pauses when GTL hatches/casings are missing, delegates to CraftingEngine, emits 1.20.1 block_place packets, and services EBF Maintenance Hatch with gtceu:duct_tape', async () => {
   const { bot, voxels, packets, sneakHistory, key } = createVirtualVoxelBot();
 
-  const engine = new CraftingEngine({ unlockedVoltageTier: 'STEAM' });
+  const engine = new CraftingEngine({ unlockedVoltageTier: 'LV' });
   engine.loadDatabaseFromFile(DB_PATH);
 
   const protectedBoxes = [];
@@ -135,55 +126,74 @@ test('MultiblockBuilder pauses when specialized GTNH hatches/casings are missing
     navigator: mockNavigator,
     craftingEngine: engine
   });
-  builder.loadBlueprintFromFile(PBF_PATH);
+  builder.loadBlueprintFromFile(EBF_PATH);
 
-  // Place a stray dirt block inside the hollow interior cavity at (100, 64, 101) to test air excavation!
-  voxels.set(key(new Vec3(100, 64, 101)), {
+  // Obstruct both an interior coil air cavity (100, 65, 99) AND the block above the Muffler Hatch (100, 68, 99)!
+  voxels.set(key(new Vec3(100, 65, 99)), {
     type: 3,
     name: 'dirt',
-    metadata: 0,
     boundingBox: 'block',
-    position: new Vec3(100, 64, 101)
+    position: new Vec3(100, 65, 99)
+  });
+  voxels.set(key(new Vec3(100, 68, 99)), {
+    type: 4,
+    name: 'cobblestone',
+    boundingBox: 'block',
+    position: new Vec3(100, 68, 99)
   });
 
-  // Initially stock ONLY 28 Firebricks and 1 Controller (missing 2 Firebricks, 1 Input Hatch, 1 Output Hatch!)
+  // Initially omit 2x LV Energy Hatches and 1x Maintenance Hatch to trigger missing-hatch craft delegation!
   engine.warehouse.upsertContainer(new Vec3(96, 63, 96), {
-    'gregtech:gt.blockcasings4:15': 28,
-    'gregtech:gt.blockmachines:1400': 1
+    'gtceu:electric_blast_furnace': 1,
+    'gtceu:heatproof_machine_casing': 10,
+    'gtceu:cupronickel_coil_block': 16,
+    'gtceu:lv_input_bus': 1,
+    'gtceu:lv_output_bus': 1,
+    'gtceu:lv_input_hatch': 1,
+    'gtceu:lv_muffler_hatch': 1
   });
 
   const firstAttempt = await builder.executeBuild(
-    'primitive_blast_furnace',
+    'electric_blast_furnace',
     new Vec3(100, 64, 100),
     { facing: 'NORTH' }
   );
 
   assert.equal(firstAttempt.status, 'PAUSED_MISSING_MATERIALS');
-  assert.equal(firstAttempt.missingMaterials.length, 3);
-  assert.equal(engine.craftQueue.length, 3, 'All 3 missing items must be queued in CraftingEngine');
+  assert.equal(firstAttempt.missingMaterials.length, 2);
+  assert.equal(engine.craftQueue.length, 2, 'Missing Energy Hatches & Maintenance Hatch must be queued');
 
   const queuedIds = engine.craftQueue.map((j) => j.itemId).sort();
   assert.deepEqual(queuedIds, [
-    'gregtech:gt.blockcasings4:15',
-    'gregtech:gt.blockmachines:151',
-    'gregtech:gt.blockmachines:161'
+    'gtceu:lv_energy_input_hatch',
+    'gtceu:maintenance_hatch'
   ]);
 
-  // Supply the missing Firebricks + Input Hatch + Output Hatch to the warehouse and resume checkpoint!
+  // Supply missing hatches + GTL quest reward `gtceu:duct_tape` and resume!
   engine.warehouse.upsertContainer(new Vec3(96, 63, 96), {
-    'gregtech:gt.blockcasings4:15': 30,
-    'gregtech:gt.blockmachines:1400': 1,
-    'gregtech:gt.blockmachines:151': 1,
-    'gregtech:gt.blockmachines:161': 1
+    'gtceu:electric_blast_furnace': 1,
+    'gtceu:heatproof_machine_casing': 10,
+    'gtceu:cupronickel_coil_block': 16,
+    'gtceu:lv_input_bus': 1,
+    'gtceu:lv_output_bus': 1,
+    'gtceu:lv_input_hatch': 1,
+    'gtceu:lv_muffler_hatch': 1,
+    'gtceu:lv_energy_input_hatch': 2,
+    'gtceu:maintenance_hatch': 1,
+    'gtceu:duct_tape': 256
   });
 
   const resumed = await builder.resumePausedBuild();
   assert.equal(resumed.status, 'COMPLETED');
-  assert.equal(resumed.dugCount, 1, 'Must excavate the stray dirt block inside the PBF air chimney');
-  assert.equal(resumed.placedCount, 33, 'Must place 30 Firebricks + Input Hatch + Output Hatch + Controller');
+  assert.equal(resumed.dugCount, 2, 'Must excavate obstructed interior air AND block above Muffler Hatch');
+  assert.equal(resumed.placedCount, 34, 'Must place all 34 solid EBF blocks');
+  assert.equal(resumed.maintenanceServiced, true, 'Must service Maintenance Hatch automatically with gtceu:duct_tape');
 
   const blockPlacePackets = packets.filter((p) => p.name === 'block_place');
-  assert.equal(blockPlacePackets.length, 33);
-  assert.ok(sneakHistory.includes(true) && sneakHistory.includes(false), 'Must toggle sneak during hatch/controller placement');
-  assert.equal(protectedBoxes.length, 1, 'Completed multiblock must register break-protection AABB');
+  assert.equal(blockPlacePackets.length, 35, '34 voxel placements + 1 gtceu:duct_tape service interaction');
+  assert.equal(blockPlacePackets[0].payload.hand, 0);
+  assert.equal(blockPlacePackets[0].payload.cursorX, 0.5);
+  assert.equal(typeof blockPlacePackets[0].payload.sequence, 'number');
+  assert.ok(sneakHistory.includes(true) && sneakHistory.includes(false));
+  assert.equal(protectedBoxes.length, 1);
 });

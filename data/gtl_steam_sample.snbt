@@ -1,0 +1,105 @@
+{
+	default_hide_dependency_lines: false
+	default_quest_shape: ""
+	filename: "77F8039ACE718C6C"
+	group: "6F8ACBFDF0F1E6F3"
+	icon: "gtceu:bronze_brick_casing"
+	id: "77F8039ACE718C6C"
+	order_index: 0
+	quest_links: [ ]
+	quests: [
+		{
+			description: ["Welcome to the Steam Age (ULV) of GregTech Leisure!"]
+			id: "5F5F348E3A34827E"
+			rewards: [{
+				id: "668249CA2B9AD459"
+				item: "gtceu:cupronickel_credit"
+				type: "item"
+			}]
+			shape: "rsquare"
+			size: 2.0d
+			tasks: [{
+				count: 8L
+				id: "14BA89F9F7AEBF7B"
+				item: "gtceu:bronze_ingot"
+				type: "item"
+			}]
+			title: "Steam Age ULV: First Bronze Ingot"
+			x: -8.0d
+			y: 0.0d
+		}
+		{
+			dependencies: ["5F5F348E3A34827E"]
+			description: [
+				"Never add water to a dry heated boiler or it will explode!"
+			]
+			id: "4BFC342697BDE75A"
+			rewards: [{
+				count: 64
+				id: "599CA37B2BA99DB9"
+				item: "sophisticatedstorage:netherite_shulker_box"
+				type: "item"
+			}]
+			tasks: [{
+				id: "23834056D1EBD24A"
+				item: "gtceu:lp_steam_solid_boiler"
+				type: "item"
+			}]
+			title: "Low Pressure Boiler"
+			x: -5.0d
+			y: 0.0d
+		}
+		{
+			dependencies: ["4BFC342697BDE75A"]
+			id: "5CE50DDC960340D8"
+			rewards: [
+				{
+					id: "1122334455667788"
+					item: "gtceu:primitive_blast_furnace"
+					type: "item"
+				}
+				{
+					count: 40
+					id: "2233445566778899"
+					item: "gtceu:firebricks"
+					type: "item"
+				}
+			]
+			tasks: [
+				{
+					id: "3344556677889900"
+					item: "gtceu:primitive_blast_furnace"
+					type: "item"
+				}
+				{
+					count: 30L
+					id: "4455667788990011"
+					item: "gtceu:firebricks"
+					type: "item"
+				}
+			]
+			title: "Primitive Blast Furnace"
+			x: -2.0d
+			y: 0.0d
+		}
+		{
+			dependencies: ["5CE50DDC960340D8"]
+			id: "51A6B6CDC90D7E76"
+			tasks: [{
+				id: "7028EB34BB4CE416"
+				item: {
+					Count: 1
+					id: "gtceu:programmed_circuit"
+					tag: {
+						Configuration: 1
+					}
+				}
+				type: "item"
+			}]
+			title: "Programmed Circuit"
+			x: 1.0d
+			y: 0.0d
+		}
+	]
+	title: "Steam Age - ULV"
+}

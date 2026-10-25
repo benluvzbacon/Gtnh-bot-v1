@@ -12,13 +12,6 @@ const {
  * with async-safe tick execution guards so async Mineflayer tasks never overlap across ticks.
  */
 class GTNHBehaviorState {
-  /**
-   * @param {string} stateName
-   * @param {Object} handlers
-   * @param {Function} [handlers.onEnter]
-   * @param {Function} [handlers.onTick]
-   * @param {Function} [handlers.onExit]
-   */
   constructor(stateName, handlers = {}) {
     this.stateName = stateName;
     this.active = false;
@@ -78,17 +71,8 @@ class GTNHBehaviorState {
 
 /**
  * Builds the 3-tier Hierarchical State Machine (`BotStateMachine` + nested `NestedStateMachine`s)
- * separating GTNH Macro Era/Quest progression from Micro execution loops and Survival preemption.
- *
- * Hierarchy:
- *  - Depth 0 (`rootMachine`): Preempts between Macro Progression, Emergency Hazard Mitigation, and Low-EU Recovery
- *    - Depth 1 (`macroProgressionMachine`): Evaluates Quest Book DAG frontier & dispatches Micro Loops
- *      - Depth 2 (`miningMicroMachine`): Locate vein -> Pathfind -> Excavate -> Return
- *      - Depth 2 (`craftingMicroMachine`): Withdraw warehouse stock -> Route to GT Machine -> Packet Clicks + Circuit -> Extract
- *      - Depth 2 (`multiblockMicroMachine`): Scan 3D footprint -> Place casings/hatches/controller -> Verify formation
- *      - Depth 2 (`sortingMicroMachine`): Consolidate bot inventory -> Index warehouse chests
- *    - Depth 1 (`emergencyHazardMachine`): Rain shutdown -> Pollution/Hostile retreat -> Safe standby
- *    - Depth 1 (`lowPowerStandbyMachine`): Pause EU recipes -> Monitor Battery Buffers / Turbines -> Resume
+ * separating GregTech Leisure (GTL) Macro FTB Quests progression from Micro execution loops
+ * and Hazard/Power Survival preemption.
  */
 function buildGTNHStateMachine({
   bot,
@@ -99,7 +83,7 @@ function buildGTNHStateMachine({
   options = {}
 }) {
   const blackboard = {
-    currentEra: 'STONE_AGE',
+    currentEra: 'STEAM_ULV',
     activeQuest: null,
     activeTaskIndex: 0,
     activeCraftingPlan: null,
@@ -158,7 +142,6 @@ function buildGTNHStateMachine({
       if (targetBlock && typeof bot?.dig === 'function') {
         await bot.dig(targetBlock);
       }
-      // Pop mined requirement from pending queue
       blackboard.pendingRawMaterials.shift();
       self.done = true;
     }
@@ -194,7 +177,7 @@ function buildGTNHStateMachine({
   miningMicroMachine.stateName = 'MiningMicroMachine';
 
   // =========================================================================
-  // DEPTH 2 — MICRO EXECUTION MACHINE 2: DAG Crafting & GT Machine GUI Loop
+  // DEPTH 2 — MICRO EXECUTION MACHINE 2: DAG Crafting & GTCEu Machine GUI Loop
   // =========================================================================
   const withdrawWarehouseState = new GTNHBehaviorState('micro_craft_withdraw_stock', {
     onEnter: async (self) => {
@@ -350,7 +333,7 @@ function buildGTNHStateMachine({
   sortingMicroMachine.stateName = 'WarehouseSortingMicroMachine';
 
   // =========================================================================
-  // DEPTH 1 — MACRO GTNH ERA & QUEST PROGRESSION MACHINE
+  // DEPTH 1 — MACRO GTL ERA & FTB QUESTS PROGRESSION MACHINE
   // =========================================================================
   const evaluateQuestState = new GTNHBehaviorState('macro_evaluate_quest_frontier', {
     onEnter: (self) => {
@@ -363,10 +346,14 @@ function buildGTNHStateMachine({
       }
 
       const nextQuest = available[0];
-      blackboard.activeQuest = nextQuest;
+      if (!blackboard.activeQuest || blackboard.activeQuest.questId !== nextQuest.questId) {
+        blackboard.activeQuest = nextQuest;
+        blackboard.activeTaskIndex = 0;
+      }
       blackboard.currentEra = nextQuest.era || blackboard.currentEra;
 
-      const task = (nextQuest.tasks || [])[blackboard.activeTaskIndex] || nextQuest.tasks?.[0];
+      const tasks = nextQuest.tasks || [];
+      const task = tasks[blackboard.activeTaskIndex] || tasks[0];
       if (!task) {
         self.done = true;
         return;
@@ -384,7 +371,6 @@ function buildGTNHStateMachine({
         });
         blackboard.activeCraftingPlan = plan;
 
-        // Check if raw materials must be mined before crafting
         const combined = craftingEngine.warehouse.getCombinedStock(bot);
         const missingRaws = [];
         for (const [rawId, neededQty] of Object.entries(plan.rawMaterials || {})) {
@@ -403,16 +389,21 @@ function buildGTNHStateMachine({
   const advanceQuestState = new GTNHBehaviorState('macro_advance_quest_stage', {
     onEnter: (self) => {
       if (blackboard.activeQuest && options.autoMarkSimulatedQuests) {
-        craftingEngine.markQuestCompleted(blackboard.activeQuest.questId);
-        blackboard.activeQuest = null;
-        blackboard.activeTaskIndex = 0;
+        const totalTasks = (blackboard.activeQuest.tasks || []).length;
+        if (blackboard.activeTaskIndex + 1 < totalTasks) {
+          blackboard.activeTaskIndex += 1;
+        } else {
+          craftingEngine.markQuestCompleted(blackboard.activeQuest.questId);
+          blackboard.activeQuest = null;
+          blackboard.activeTaskIndex = 0;
+        }
       }
       self.done = true;
     }
   });
 
   const victoryState = new BehaviorIdle();
-  victoryState.stateName = 'macro_gtnh_stargate_victory';
+  victoryState.stateName = 'macro_gtl_max_tier_victory';
 
   const macroProgressionMachine = new NestedStateMachine(
     [
@@ -531,7 +522,7 @@ function buildGTNHStateMachine({
   macroProgressionMachine.stateName = 'MacroProgressionMachine';
 
   // =========================================================================
-  // DEPTH 1 — EMERGENCY HAZARD MITIGATION MACHINE (Rain / Pollution / Combat)
+  // DEPTH 1 — EMERGENCY HAZARD MITIGATION MACHINE (Rain / Toxic / Combat)
   // =========================================================================
   const mitigateThreatState = new GTNHBehaviorState('emergency_mitigate_hazard', {
     onEnter: async (self) => {
@@ -635,13 +626,11 @@ function buildGTNHStateMachine({
     ],
     macroProgressionMachine
   );
-  rootMachine.stateName = 'RootGTNHStateMachine';
+  rootMachine.stateName = 'RootGTLStateMachine';
 
   const botStateMachine = new BotStateMachine(bot, rootMachine);
 
-  // Compatibility bridge: mineflayer-statemachine@1.7.0 binds legacy 'physicTick',
-  // whereas modern Mineflayer 4.x standardizes on 'physicsTick' (emitting both in 4.39).
-  // Deduplicate per tick turn so rootMachine.update() executes cleanly on 'physicsTick' too.
+  // Deduplicate legacy 'physicTick' and modern 'physicsTick'
   let updatedThisTurn = false;
   const origUpdate = botStateMachine.update.bind(botStateMachine);
   botStateMachine.update = () => {
@@ -674,5 +663,7 @@ function buildGTNHStateMachine({
 
 module.exports = {
   GTNHBehaviorState,
-  buildGTNHStateMachine
+  GTLBehaviorState: GTNHBehaviorState,
+  buildGTNHStateMachine,
+  buildGTLStateMachine: buildGTNHStateMachine
 };
