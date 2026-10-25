@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/bot.js",
+    "probe-server": "node src/cli/probeServer.js",
     "dry-run": "node src/bot.js --dry-run",
     "optimize-pack": "node src/cli/optimizeModpack.js",
     "ingest": "node src/cli/ingestData.js",

@@ -288,19 +288,24 @@ class ContainerPacketController extends EventEmitter {
     const client = bot._client;
     if (!client || typeof client.on !== 'function') return;
 
-    client.on('open_window', (packet) => {
+    const onWindowOpen = (packet) => {
       this._stateId = 0;
       this.activeWindow = {
         windowId: packet.windowId,
         inventoryType: packet.inventoryType,
+        menuTypeName: packet.menuTypeName || null,
         windowTitle: packet.windowTitle,
+        extraData: packet.extraData || null,
         stateId: 0,
         slots: [],
         carriedItem: { present: false }
       };
       this.progressBars.clear();
       this.emit('windowOpened', this.activeWindow);
-    });
+    };
+
+    client.on('open_window', onWindowOpen);
+    client.on('fmlOpenContainer', onWindowOpen);
 
     client.on('window_items', (packet) => {
       if (Number.isInteger(packet.stateId)) {

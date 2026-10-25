@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const { EventEmitter } = require('events');
 const mineflayer = require('mineflayer');
@@ -11,6 +12,8 @@ const Vec3 = require('vec3');
 const {
   ForgeRegistryBridge,
   attachForgeHandshake,
+  buildModded1201CustomPackets,
+  buildForgeTaggedHost,
   DEFAULT_GTL_MODLIST
 } = require('./protocol/forgeHandshake');
 const { GTNHNavigator } = require('./navigation/gtnhNavigator');
@@ -24,11 +27,52 @@ const { HazardMonitor } = require('./hazards/hazardMonitor');
 const { buildGTLStateMachine } = require('./statemachine/hierarchy');
 
 /**
+ * Parses optional CLI flags (`--host`, `--port`, `--username`, `--auth`, `--version`, `--fml2`)
+ * so Windows PowerShell/CMD, macOS, and Linux users can pass flags directly via `npm start -- ...`.
+ */
+function parseCliOverrides(argv = []) {
+  const overrides = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const next = argv[i + 1];
+    if (arg === '--host' && next) {
+      overrides.host = next;
+      i++;
+    } else if (arg === '--port' && next) {
+      overrides.port = Number(next);
+      i++;
+    } else if ((arg === '--username' || arg === '--user') && next) {
+      overrides.username = next;
+      i++;
+    } else if (arg === '--auth' && next) {
+      overrides.auth = next;
+      i++;
+    } else if (arg === '--version' && next) {
+      overrides.version = next;
+      i++;
+    } else if (arg === '--fml2') {
+      overrides.fmlMarker = '\0FML2\0';
+    } else if (arg === '--fml3') {
+      overrides.fmlMarker = '\0FML3\0';
+    } else if (arg === '--no-reconnect') {
+      overrides.autoReconnect = false;
+    }
+  }
+  return overrides;
+}
+
+/**
  * Resolves runtime configuration for GregTech Leisure (Minecraft 1.20.1, Forge 47.4.16).
  * Because Mineflayer 4.39+ speaks 1.20.1 (protocol 763) natively, no external ViaProxy
  * Java process is required — saving ~300 MB of RAM on low-end PCs!
  */
 function resolveAgentConfig(overrides = {}) {
+  const fmlEnv = process.env.GTL_FML_MARKER || process.env.GTNH_FML_MARKER || null;
+  let defaultMarker = '\0FML3\0';
+  if (fmlEnv === 'FML2' || fmlEnv === '\0FML2\0') {
+    defaultMarker = '\0FML2\0';
+  }
+
   return {
     host: overrides.host || process.env.GTL_HOST || process.env.GTNH_HOST || '127.0.0.1',
     port: Number(overrides.port || process.env.GTL_PORT || process.env.GTNH_PORT || 25565),
@@ -39,6 +83,7 @@ function resolveAgentConfig(overrides = {}) {
       'GTL_Automaton',
     auth: overrides.auth || process.env.GTL_AUTH || process.env.GTNH_AUTH || 'offline',
     version: overrides.version || process.env.GTL_VERSION || process.env.GTNH_VERSION || '1.20.1',
+    fmlMarker: overrides.fmlMarker || defaultMarker,
     forgeBridgeMode:
       overrides.forgeBridgeMode ||
       process.env.GTL_FORGE_MODE ||
@@ -79,7 +124,7 @@ function resolveAgentConfig(overrides = {}) {
 
 /**
  * Top-level Headless GregTech Leisure (GTL) Automation Agent orchestrating:
- *  - Forge 1.20.1 (`FML3` / `fml:loginwrapper` / `fml:handshake`) protocol handshake & registry sync
+ *  - Forge 1.20.1 (`FML3` / `FML2` `fml:loginwrapper` + `fml:play`) handshake & live registry sync
  *  - Hazard-hardened 1.20.1 spatial navigation (`GTLNavigator` — steam vents, hot pipes, Y=-64 shafts)
  *  - FTB Quests & GTCEu/KubeJS DAG crafting engine + 1.20.1 LDLib packet GUI controller (`CraftingEngine`)
  *  - 3D schematic multiblock printer with `gtceu:duct_tape` Maintenance Hatch servicing (`MultiblockBuilder`)
@@ -90,6 +135,7 @@ class GTLAutomationAgent extends EventEmitter {
   constructor(configOverrides = {}) {
     super();
     this.config = resolveAgentConfig(configOverrides);
+    this._activeFmlMarker = this.config.fmlMarker || '\0FML3\0';
 
     this.registryBridge = new ForgeRegistryBridge();
     this.warehouse = new WarehouseTracker({ registryBridge: this.registryBridge });
@@ -114,6 +160,7 @@ class GTLAutomationAgent extends EventEmitter {
     this._shuttingDown = false;
     this._reconnectAttempts = 0;
     this._reconnectTimer = null;
+    this._fastRetryOverrideMs = null;
 
     this._loadStaticAssets();
   }
@@ -162,33 +209,84 @@ class GTLAutomationAgent extends EventEmitter {
   }
 
   /**
-   * Connects directly to a GregTech Leisure 1.20.1 server or Open-to-LAN instance
-   * using native Mineflayer 1.20.1 + Forge `FML3` (`fml:loginwrapper`) handshake.
+   * Connects directly to a GregTech Leisure 1.20.1 Forge server or Open-to-LAN instance
+   * using native Mineflayer 1.20.1 + Forge `FML3` (`\0FML3\0` + `fml:loginwrapper`) handshake.
    */
-  connect() {
+  connect(extraBotOptions = {}) {
     this._shuttingDown = false;
+    this.fmlSession = null;
     const forgeMods = this._loadForgeModList();
+    const fmlMarker = extraBotOptions.fmlMarker || this._activeFmlMarker || '\0FML3\0';
+    const host = this.config.host;
+    const port = this.config.port;
 
-    const botInstance = mineflayer.createBot({
-      host: this.config.host,
-      port: this.config.port,
+    // For direct IPs, localhost, or explicit non-25565 ports (where DNS SRV lookup does not run),
+    // also pass `fakeHost: "<host>\\0FML3\\0"` directly to `createBot` so even synchronous stream
+    // transports carry the Forge marker on the very first `set_protocol` packet.
+    const isDirectEndpoint =
+      net.isIP(host) !== 0 || host === 'localhost' || port !== 25565 || Boolean(extraBotOptions.stream);
+
+    const createOpts = {
+      host,
+      port,
       username: this.config.username,
       auth: this.config.auth,
-      version: this.config.version
-    });
+      version: this.config.version,
+      customPackets: buildModded1201CustomPackets(),
+      ...(isDirectEndpoint && this.config.forgeBridgeMode !== 'vanilla'
+        ? { fakeHost: buildForgeTaggedHost(host, fmlMarker) }
+        : {}),
+      ...extraBotOptions
+    };
 
-    return this.attachBot(botInstance, { forgeMods });
+    const botInstance = mineflayer.createBot(createOpts);
+    return this.attachBot(botInstance, { forgeMods, fmlMarker });
   }
 
   attachBot(bot, options = {}) {
     this.bot = bot;
+    const fmlMarker = options.fmlMarker || this._activeFmlMarker || '\0FML3\0';
 
-    if (!this.fmlSession && bot._client) {
+    if (!this.fmlSession && bot._client && this.config.forgeBridgeMode !== 'vanilla') {
       this.fmlSession = attachForgeHandshake(bot._client, {
         forgeMods: options.forgeMods || this._loadForgeModList(),
         registryBridge: this.registryBridge,
+        fmlMarker,
         autoMirrorServerMods: options.autoMirrorServerMods !== false,
-        useAutoVersionForge: Boolean(options.useAutoVersionForge)
+        useAutoVersionForge: Boolean(options.useAutoVersionForge),
+        ackModData: Boolean(options.ackModData)
+      });
+    }
+
+    // Install solid modded blockStateId fallback immediately + sync any preloaded registry dump
+    if (bot.registry) {
+      this.registryBridge.syncToBotRegistry(bot.registry);
+    }
+
+    // Re-sync live Forge S2CRegistry snapshots into Mineflayer's `bot.registry` upon login success
+    if (bot._client && typeof bot._client.on === 'function') {
+      bot._client.on('fmlHandshakeStart', (info) => {
+        this.emit('log', {
+          level: 'info',
+          message: `[Forge1201] ${info.protocol} Handshake started — server advertised ${info.serverModsCount} mods, ${info.channelsCount} channels, ${info.registriesExpected} registries.`
+        });
+      });
+
+      bot._client.on('fmlChannelMismatch', (mismatches) => {
+        this.emit('log', {
+          level: 'error',
+          message: `[Forge1201] Server rejected channel versions: ${JSON.stringify(mismatches)}`
+        });
+      });
+
+      bot._client.on('fmlHandshakeComplete', (summary) => {
+        if (bot.registry) {
+          this.registryBridge.syncToBotRegistry(bot.registry);
+        }
+        this.emit('log', {
+          level: 'info',
+          message: `[Forge1201] ${summary.protocol} Handshake complete! Synced ${summary.registriesSynced} registries (${summary.mappedItems} items, ${summary.mappedBlocks} blocks) & ${summary.configsSynced} server configs.`
+        });
       });
     }
 
@@ -220,8 +318,16 @@ class GTLAutomationAgent extends EventEmitter {
     } else if (typeof bot.once === 'function') {
       bot.once('spawn', () => {
         this._reconnectAttempts = 0;
+        if (bot.registry) {
+          this.registryBridge.syncToBotRegistry(bot.registry);
+        }
+        const pos = bot.entity?.position;
+        this.emit('log', {
+          level: 'info',
+          message: `[Forge1201] Spawned in GregTech Leisure world${pos ? ` at (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})` : ''}!`
+        });
         this._initStateMachine(options.stateMachineOptions);
-        this.emit('ready', { position: bot.entity?.position });
+        this.emit('ready', { position: pos });
       });
     }
 
@@ -244,12 +350,14 @@ class GTLAutomationAgent extends EventEmitter {
 
   _bindWorldAndTelemetryListeners(bot) {
     if (this.config.debugWindows && bot._client) {
-      bot._client.on('open_window', (pkt) => {
+      const logOpen = (pkt) => {
         this.emit('log', {
           level: 'debug',
           message: `[WindowCalibration] Opened windowId=${pkt.windowId} type=${pkt.inventoryType} title=${pkt.windowTitle}`
         });
-      });
+      };
+      bot._client.on('open_window', logOpen);
+      bot._client.on('fmlOpenContainer', logOpen);
     }
 
     this.hazardMonitor.on('weatherEmergency', (event) => {
@@ -289,11 +397,48 @@ class GTLAutomationAgent extends EventEmitter {
 
     if (typeof bot.on === 'function') {
       bot.on('kicked', (reason) => {
-        this.emit('log', { level: 'error', message: `[Forge1201] Kicked: ${reason}` });
+        const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason);
+        this.emit('log', { level: 'error', message: `[Forge1201] Kicked: ${reasonStr}` });
+
+        // Automatic FML3 <-> FML2 net-version negotiation fallback
+        if (reasonStr.includes('this server is net version 2') && this._activeFmlMarker !== '\0FML2\0') {
+          this._activeFmlMarker = '\0FML2\0';
+          this._fastRetryOverrideMs = 250;
+          this.emit('log', {
+            level: 'warn',
+            message: '[Forge1201] Server requested Forge net version 2 (FML2) — switching marker to \\0FML2\\0 and reconnecting immediately!'
+          });
+        } else if (reasonStr.includes('this server is net version 3') && this._activeFmlMarker !== '\0FML3\0') {
+          this._activeFmlMarker = '\0FML3\0';
+          this._fastRetryOverrideMs = 250;
+          this.emit('log', {
+            level: 'warn',
+            message: '[Forge1201] Server requested Forge net version 3 (FML3) — switching marker to \\0FML3\\0 and reconnecting immediately!'
+          });
+        } else if (
+          this.config.auth === 'offline' &&
+          (reasonStr.includes('unverified_username') ||
+            reasonStr.toLowerCase().includes('invalid session') ||
+            reasonStr.toLowerCase().includes('failed to verify username'))
+        ) {
+          this.emit('log', {
+            level: 'error',
+            message:
+              '[Forge1201] Server has online-mode=true! Re-run with `--auth microsoft --username <your_email_or_gamertag>` (or set `online-mode=false` in server.properties / use Open to LAN).'
+          });
+        }
       });
 
       bot.on('error', (err) => {
-        this.emit('log', { level: 'error', message: `[Forge1201] Network error: ${err.message}` });
+        const msg = err?.message || String(err);
+        if (msg.startsWith('Parse error for play.toClient')) {
+          this.emit('log', {
+            level: 'warn',
+            message: `[Forge1201] Ignored non-fatal modded play packet layout warning: ${msg}`
+          });
+          return;
+        }
+        this.emit('log', { level: 'error', message: `[Forge1201] Network error: ${msg}` });
       });
 
       bot.on('end', (reason) => {
@@ -309,10 +454,15 @@ class GTLAutomationAgent extends EventEmitter {
   _scheduleReconnect() {
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
     this._reconnectAttempts += 1;
-    const delay = Math.min(60000, this.config.reconnectBaseDelayMs * Math.pow(1.5, this._reconnectAttempts - 1));
+    const delay =
+      this._fastRetryOverrideMs != null
+        ? this._fastRetryOverrideMs
+        : Math.min(60000, this.config.reconnectBaseDelayMs * Math.pow(1.5, this._reconnectAttempts - 1));
+    this._fastRetryOverrideMs = null;
+
     this.emit('log', {
       level: 'info',
-      message: `[Forge1201] Reconnecting in ${Math.round(delay)}ms (attempt #${this._reconnectAttempts})...`
+      message: `[Forge1201] Reconnecting in ${Math.round(delay)}ms (attempt #${this._reconnectAttempts}, marker=${this._activeFmlMarker.replace(/\0/g, '')})...`
     });
     this._reconnectTimer = setTimeout(() => {
       if (!this._shuttingDown) {
@@ -333,6 +483,9 @@ class GTLAutomationAgent extends EventEmitter {
     if (this.bot && typeof this.bot.quit === 'function') {
       this.bot.quit('GTL Bot graceful shutdown');
     }
+    if (this.bot?._client?.closeTimer) {
+      this.bot._client.closeTimer.unref?.();
+    }
   }
 }
 
@@ -346,7 +499,6 @@ async function runHeadlessDryRun() {
   const agent = new GTLAutomationAgent({ autoReconnect: false });
   agent.craftingEngine.setUnlockedVoltageTier('LV');
 
-  // Seed sample Sophisticated Storage barrel at (104, 64, 98) with partial GTL intermediates
   agent.warehouse.upsertContainer(
     new Vec3(104, 64, 98),
     {
@@ -408,7 +560,8 @@ if (require.main === module) {
       process.exitCode = 1;
     });
   } else {
-    const agent = new GTLAutomationAgent();
+    const cliOverrides = parseCliOverrides(args);
+    const agent = new GTLAutomationAgent(cliOverrides);
     agent.on('log', (entry) => {
       const fn = entry.level === 'error' ? console.error : console.log;
       fn(`${new Date().toISOString()} [${entry.level.toUpperCase()}] ${entry.message}`);
@@ -425,7 +578,7 @@ if (require.main === module) {
     });
 
     console.log(
-      `Booting GregTech Leisure Headless Agent -> ${agent.config.host}:${agent.config.port} as '${agent.config.username}' (MC ${agent.config.version} / ${agent.config.forgeBridgeMode})...`
+      `Booting GregTech Leisure Headless Agent -> ${agent.config.host}:${agent.config.port} as '${agent.config.username}' (MC ${agent.config.version} / auth=${agent.config.auth} / marker=${agent._activeFmlMarker.replace(/\0/g, '')})...`
     );
     agent.connect();
   }
@@ -435,5 +588,6 @@ module.exports = {
   GTLAutomationAgent,
   GTNHAutomationAgent: GTLAutomationAgent,
   resolveAgentConfig,
+  parseCliOverrides,
   runHeadlessDryRun
 };

@@ -144,15 +144,33 @@ npm run plan -- kubejs:advanced_control_circuit 4 STEAM
 npm run validate-blueprint -- ./data/electric_blast_furnace.json EAST
 ```
 
-### 4. Connect the Headless Bot to GregTech Leisure (Open-to-LAN or Server)
+### 4. Connect the Headless Bot to GregTech Leisure (Open-to-LAN or Dedicated Forge Server)
 
-In singleplayer GregTech Leisure, press **Esc -> Open to LAN** (note the port printed in chat, e.g. `54321`), or start a local GTL Forge `47.4.16` server (`online-mode=false` for local offline bots):
+First, make sure you pull the latest version (`git pull && npm install`), and optionally probe your server's Forge handshake version (`FML3` / `47.4.16`) and mod list:
 
 ```bash
-GTL_HOST=127.0.0.1 \
-GTL_PORT=54321 \
-GTL_USERNAME=GTL_Automaton \
-GTL_AUTH=offline \
-GTL_INITIAL_TIER=STEAM \
-npm start
+npm run probe-server -- 127.0.0.1 25565
 ```
+
+#### Option A: Singleplayer **Open to LAN** (Works on Windows PowerShell/CMD, macOS, and Linux)
+1. In your GregTech Leisure world, press **Esc -> Open to LAN -> Start LAN World** and check the port printed in chat (e.g. `54321`).
+2. Run:
+```bash
+npm start -- --host 127.0.0.1 --port 54321 --auth offline --username GTL_Automaton
+```
+
+#### Option B: Dedicated GregTech Leisure Server (`online-mode=false`)
+```bash
+npm start -- --host <SERVER_IP> --port 25565 --auth offline --username GTL_Automaton
+```
+
+#### Option C: Dedicated GregTech Leisure Server (`online-mode=true` — Microsoft Account)
+If the server verifies Mojang/Microsoft sessions (`online-mode=true`), pass `--auth microsoft` — the terminal will display a one-time `microsoft.com/link` device login code and cache your token locally:
+```bash
+npm start -- --host <SERVER_IP> --port 25565 --auth microsoft --username <YOUR_GAMERTAG_OR_EMAIL>
+```
+
+#### How the Forge `1.20.1` (`47.4.16` `FML3`) Connection Works Under the Hood
+- **Immediate `\0FML3\0` Handshake Marker** (`ServerLifecycleHooks.handleServerLogin`): Injects `<host>\0FML3\0` on the initial `set_protocol` intention packet (with automatic `\0FML2\0` fallback if a server uses net version 2), preventing Forge's `"This server has mods that require Forge to be installed on the client"` rejection.
+- **Full `fml:loginwrapper` & `fml:handshake` Negotiation**: Removes `minecraft-protocol`'s vanilla `onLoginPluginRequest` auto-null responder (which otherwise triggers `"Unexpected custom data from client"`), handles `S2CModData` (`5`, `.noResponse()`), echoes all 180+ GregTech Leisure server mods & required channels in `C2SModListReply` (`2`), ingests `S2CRegistry` (`3`) snapshots into `bot.registry`, acknowledges all `S2CConfigData` (`4`) TOMLs and custom mod login payloads, and decodes `fml:play` `OpenContainer` (`NetworkHooks.openScreen`) packets for GTCEu/LDLib GUIs.
+- **Zero-Crash Modded Play Deserialization & Solid Modded Floor Physics**: Overrides `declare_recipes` and `declare_commands` with zero-copy `restBuffer` readers (+ synthetic root command node) so custom GTCEu/AE2/KubeJS recipe serializers and Forge command arguments never crash ProtoDef or bloat RAM, and proxies modded `blockStateId`s as solid `1x1x1` blocks so Mineflayer stands and pathfinds cleanly on modded factory floors.
