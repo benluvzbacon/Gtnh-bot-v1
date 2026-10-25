@@ -71,6 +71,52 @@ function installPhysicTickDeprecationShim(bot) {
 }
 
 /**
+ * Prevents two severe Mineflayer `1.20.1` `inventory.js` window-click stalls:
+ *  1. `waitForWindowUpdate` awaits `once(window, 'updateSlot:0')` with NO timeout whenever clicking
+ *     slots `0..4` (`minecraft:inventory`) or `0..9` (`minecraft:crafting`). On Minecraft `1.20.1`
+ *     servers, any click that leaves result slot `0` unchanged (`null -> null`, e.g. placing the
+ *     1st cobblestone of a pickaxe/furnace or clearing an empty cell) emits NO `set_slot(0)` packet,
+ *     which hangs raw `bot.clickWindow` forever unless guarded by a bounded fallback emit.
+ *  2. Clears `bot.lastDigTime` prior to window clicks so hotbar slot clicks right after chopping
+ *     or mining do not block for 500ms (`DIG_CLICK_TIMEOUT`).
+ */
+function installFastWindowClickShim(bot, options = {}) {
+  if (!bot || bot._gtlFastClickShimmed || typeof bot.clickWindow !== 'function') return;
+  const slot0TimeoutMs = options.slot0TimeoutMs ?? 80;
+  const origClickWindow = bot.clickWindow.bind(bot);
+
+  bot.clickWindow = async (slot, mouseButton, mode) => {
+    if (bot.lastDigTime != null) {
+      bot.lastDigTime = null;
+    }
+
+    const activeWindow = bot.currentWindow || bot.inventory;
+    const winType = String(activeWindow?.type || '');
+    const waitsOnSlot0 =
+      activeWindow &&
+      typeof activeWindow.emit === 'function' &&
+      ((winType === 'minecraft:inventory' && slot >= 0 && slot <= 4) ||
+        (winType.startsWith('minecraft:crafting') && slot >= 0 && slot <= 9));
+
+    let unblockTimer = null;
+    if (waitsOnSlot0) {
+      unblockTimer = setTimeout(() => {
+        const cur0 = activeWindow.slots?.[0] ?? null;
+        activeWindow.emit('updateSlot:0', cur0, cur0);
+      }, slot0TimeoutMs);
+    }
+
+    try {
+      return await origClickWindow(slot, mouseButton, mode);
+    } finally {
+      if (unblockTimer) clearTimeout(unblockTimer);
+    }
+  };
+
+  bot._gtlFastClickShimmed = true;
+}
+
+/**
  * Helper base class implementing `mineflayer-statemachine`'s `StateBehavior` contract
  * with async-safe tick execution guards so async Mineflayer tasks never overlap across ticks.
  */
@@ -730,6 +776,7 @@ module.exports = {
   GTNHBehaviorState,
   GTLBehaviorState: GTNHBehaviorState,
   installPhysicTickDeprecationShim,
+  installFastWindowClickShim,
   resolveWorldBlockIdsForRawItem,
   buildGTNHStateMachine,
   buildGTLStateMachine: buildGTNHStateMachine

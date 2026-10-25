@@ -6,6 +6,8 @@ const { EventEmitter } = require('events');
 const Vec3 = require('vec3');
 const { goals } = require('mineflayer-pathfinder');
 const { normalizeItemId } = require('../protocol/forgeHandshake');
+const { installFastWindowClickShim } = require('../statemachine/hierarchy');
+const { SAFE_WATER_BLOCK_NAMES } = require('../navigation/gtnhNavigator');
 
 const VANILLA_LOG_BLOCKS = [
   'oak_log',
@@ -252,6 +254,7 @@ class AutonomousProgressionEngine extends EventEmitter {
   }) {
     super();
     this.bot = bot;
+    installFastWindowClickShim(this.bot, { slot0TimeoutMs: options.slot0TimeoutMs ?? 80 });
     this.navigator = navigator;
     this.craftingEngine = craftingEngine;
     this.multiblockBuilder = multiblockBuilder;
@@ -263,6 +266,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       path.resolve(process.cwd(), '.gtl-runtime-state.json');
     this.persistState = options.persistState ?? true;
     this.stepIntervalMs = options.stepIntervalMs ?? 55;
+    this.cycleTimeoutMs = options.cycleTimeoutMs ?? 35000;
     this.searchRadius = options.searchRadius ?? 64;
     this.actionDelayScale = options.actionDelayScale ?? 1;
 
@@ -298,6 +302,10 @@ class AutonomousProgressionEngine extends EventEmitter {
     this._loopTimer = null;
     this._currentMilestoneId = 'IDLE';
     this._lastLoggedStatus = '';
+    this._needsBodyReconcile = true;
+    this._lastProgressPos = null;
+    this._lastInvSignature = '';
+    this._stuckCycles = 0;
 
     if (this.persistState) {
       this._loadWorldState();
@@ -373,12 +381,223 @@ class AutonomousProgressionEngine extends EventEmitter {
     return this.worldState.completedMilestones.includes(milestoneId);
   }
 
+  _unmarkMilestones(milestoneIds = []) {
+    const removeSet = new Set(milestoneIds);
+    const before = this.worldState.completedMilestones.length;
+    this.worldState.completedMilestones = this.worldState.completedMilestones.filter(
+      (id) => !removeSet.has(id)
+    );
+    if (this.worldState.completedMilestones.length !== before) {
+      this._saveWorldState();
+    }
+  }
+
+  _isWaterBlockName(name) {
+    if (!name) return false;
+    const clean = String(name).toLowerCase().replace(/^minecraft:/, '');
+    return SAFE_WATER_BLOCK_NAMES.has(clean);
+  }
+
+  _isDryStandableSpot(pos) {
+    if (typeof this.bot?.blockAt !== 'function' || !pos) return true;
+    const p = pos instanceof Vec3 ? pos.floored() : new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+    const ground = this.bot.blockAt(p.offset(0, -1, 0));
+    const feet = this.bot.blockAt(p);
+    const head = this.bot.blockAt(p.offset(0, 1, 0));
+    if (!ground || !feet || !head) return false;
+
+    const groundName = String(ground.name || '').toLowerCase();
+    const feetName = String(feet.name || '').toLowerCase();
+    const headName = String(head.name || '').toLowerCase();
+
+    return (
+      ground.boundingBox === 'block' &&
+      !groundName.includes('leaves') &&
+      !groundName.includes('magma') &&
+      !groundName.includes('cactus') &&
+      !this._isWaterBlockName(groundName) &&
+      feet.boundingBox === 'empty' &&
+      !this._isWaterBlockName(feetName) &&
+      !feetName.includes('lava') &&
+      !feetName.includes('fire') &&
+      head.boundingBox === 'empty' &&
+      !this._isWaterBlockName(headName) &&
+      !headName.includes('lava')
+    );
+  }
+
+  /**
+   * Synchronizes persisted `.gtl-runtime-state.json` against the player's ACTUAL live body,
+   * inventory, crafting grid, and surrounding world blocks on connect/reconnect/respawn:
+   *  - Sweeps any leftover items stuck in `inv.slots[1..4]` or cursor (`selectedItem`) from
+   *    an earlier interrupted (`Ctrl+C`) session in the same player body.
+   *  - Validates `baseAnchor` (re-anchoring on dry land if spawned in a new world or in water).
+   *  - Discovers existing nearby `crafting_table` / `furnace` / `blast_furnace` / `chest` blocks.
+   *  - Fast-forwards early milestones when reconnecting into a body that already holds tools,
+   *    and rolls back stale milestones if items/stations are missing after death or world reset.
+   */
+  async reconcileStateWithCurrentBody() {
+    this._needsBodyReconcile = false;
+    if (!this.bot) return;
+
+    // 1. Clean any leftover 2x2 inventory crafting grid / cursor items persisted on the player body
+    if (this.bot.inventory && typeof this.bot.clickWindow === 'function') {
+      await this._ensureCleanCraftingGrid(this.bot.inventory, 4);
+    }
+
+    // 2. If spawned underwater or floating in water, swim onto dry shore before anchoring Base Camp
+    if (this.navigator?.isBotInWater?.() && typeof this.navigator.swimToSafety === 'function') {
+      this._log('info', 'Spawned in water — swimming to nearest dry shoreline before anchoring Base Camp...');
+      await this.navigator.swimToSafety(10000);
+    }
+
+    // 3. Validate saved `baseAnchor` against loaded world terrain & nearby stations
+    if (this.worldState.baseAnchor && this.bot.entity?.position) {
+      const saved = this.worldState.baseAnchor;
+      const savedVec = new Vec3(saved.x, saved.y, saved.z);
+      const dist = this.bot.entity.position.distanceTo(savedVec);
+      const hasAnyValidSavedStation = Boolean(
+        this.getValidStationBlock('craftingTable', 'crafting_table') ||
+          this.getValidStationBlock('furnace', 'furnace') ||
+          this.getValidStationBlock('blastFurnace', 'blast_furnace')
+      );
+
+      if (dist > 160 || (!hasAnyValidSavedStation && !this._isDryStandableSpot(savedVec))) {
+        this._log(
+          'info',
+          `Resetting stale/wet Base Camp anchor (${saved.x}, ${saved.y}, ${saved.z}) for current body position.`
+        );
+        this.worldState.baseAnchor = null;
+        this.worldState.stations = {
+          craftingTable: null,
+          furnace: null,
+          furnaceAux: null,
+          blastFurnace: null,
+          chests: [],
+          boiler: null,
+          steamMachines: {},
+          lvMachines: {},
+          pbfAnchor: null,
+          largeSteamCircuitAnchor: null,
+          ebfAnchor: null
+        };
+      }
+    }
+
+    // 4. Discover any pre-existing stations within 14 blocks of the player body (e.g. same-body resume)
+    if (typeof this.bot.findBlock === 'function' && this.bot.registry?.blocksByName) {
+      const stationChecks = [
+        ['craftingTable', 'crafting_table'],
+        ['furnace', 'furnace'],
+        ['blastFurnace', 'blast_furnace']
+      ];
+      for (const [key, blkName] of stationChecks) {
+        if (!this.getValidStationBlock(key, blkName)) {
+          const id = this.bot.registry.blocksByName[blkName]?.id;
+          if (typeof id === 'number') {
+            const found = this.bot.findBlock({ matching: id, maxDistance: 14 });
+            if (found?.position) {
+              this.worldState.stations[key] = {
+                x: found.position.x,
+                y: found.position.y,
+                z: found.position.z
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // 5. Bi-directional milestone reconciliation (same-body fast-forward + stale-file rollback)
+    const hasAnyPick = Boolean(this.findInventoryItem('#pickaxe'));
+    const hasStoneOrBetterPick = Boolean(
+      this.findInventoryItem(['minecraft:stone_pickaxe', '#iron_tier_pickaxe'])
+    );
+    const hasAxe = Boolean(this.findInventoryItem('#axe'));
+    const hasTable =
+      Boolean(this.getValidStationBlock('craftingTable', 'crafting_table')) ||
+      this.countInventory('minecraft:crafting_table') > 0;
+    const hasFurnace =
+      Boolean(this.getValidStationBlock('furnace', 'furnace')) ||
+      this.countInventory('minecraft:furnace') > 0;
+    const hasBlastFurnace =
+      Boolean(this.getValidStationBlock('blastFurnace', 'blast_furnace')) ||
+      this.countInventory('minecraft:blast_furnace') > 0;
+
+    // Fast-forward if reconnecting into a body that already holds tools/stations
+    if (hasAnyPick || hasTable) {
+      this.markMilestoneComplete('M01_WOOD_BOOTSTRAP');
+      if (hasAnyPick && hasTable) {
+        this.markMilestoneComplete('M02_BASE_AND_CRAFTING_TABLE');
+      }
+    }
+    if (hasStoneOrBetterPick && hasAxe && (hasFurnace || hasBlastFurnace)) {
+      this.markMilestoneComplete('M03_STONE_TOOLS_AND_FURNACE');
+    }
+
+    // Roll back stale milestones if items/stations do not actually exist in this world/body
+    if (!hasAnyPick && !hasTable) {
+      if (this.countInventory('#planks') < 4 && this.countInventory('#logs') === 0) {
+        this._unmarkMilestones(['M01_WOOD_BOOTSTRAP']);
+      }
+      this._unmarkMilestones(['M02_BASE_AND_CRAFTING_TABLE', 'M03_STONE_TOOLS_AND_FURNACE']);
+    } else if (!hasStoneOrBetterPick || (!hasFurnace && !hasBlastFurnace)) {
+      this._unmarkMilestones(['M03_STONE_TOOLS_AND_FURNACE']);
+    }
+
+    if (this.hasMilestone('M05_FAST_BLAST_FURNACE_AND_IRON_KIT') && !hasBlastFurnace) {
+      this._unmarkMilestones(['M05_FAST_BLAST_FURNACE_AND_IRON_KIT']);
+    }
+
+    if (
+      this.hasMilestone('M06_GTCEU_HAND_TOOLS') &&
+      (!this.findInventoryItem('#gtceu:hammer') ||
+        !this.findInventoryItem('#gtceu:wrench') ||
+        !this.findInventoryItem('#gtceu:mortar'))
+    ) {
+      this._unmarkMilestones(['M06_GTCEU_HAND_TOOLS']);
+    }
+
+    this._saveWorldState();
+
+    const pos = this.bot.entity?.position;
+    const invSummary = this.getInventoryItems()
+      .slice(0, 6)
+      .map((i) => `${this.registryBridge.toCanonicalItemId(i).replace(/^minecraft:/, '')}x${i.count ?? 1}`)
+      .join(', ');
+    this._log(
+      'info',
+      `Body & World Sync complete${pos ? ` at (${Math.floor(pos.x)}, ${Math.floor(pos.y)}, ${Math.floor(pos.z)})` : ''} — ` +
+        `inWater=${Boolean(this.navigator?.isBotInWater?.())}, inv=[${invSummary || 'empty'}], ` +
+        `milestones=${this.worldState.completedMilestones.length}`
+    );
+  }
+
+  async _recoverFromStall(reason = 'cycle watchdog') {
+    this._log('warn', `Watchdog recovering stalled action (${reason}) — resetting window & pathfinder...`);
+    try {
+      this._sharedTableWindow = null;
+      if (this.bot?.currentWindow && typeof this.bot.closeWindow === 'function') {
+        await Promise.race([this.bot.closeWindow(this.bot.currentWindow), sleepMs(250)]);
+      }
+    } catch (_) {
+      // Safe cleanup
+    }
+    this.navigator?.stop?.();
+    this.unreachableBlacklist.clear();
+    if (this.navigator?.isBotInWater?.() && typeof this.navigator.swimToSafety === 'function') {
+      await this.navigator.swimToSafety(6000);
+    }
+  }
+
   /**
    * Starts continuous autonomous survival progression on the live Mineflayer bot.
    */
   start() {
     if (this._running) return;
     this._running = true;
+    this._needsBodyReconcile = true;
+    installFastWindowClickShim(this.bot);
 
     this._log(
       'info',
@@ -388,10 +607,12 @@ class AutonomousProgressionEngine extends EventEmitter {
     if (typeof this.bot?.on === 'function') {
       this._onDeath = () => {
         this._log('warn', 'Bot died! Waiting for respawn to recover and continue progression...');
+        this._sharedTableWindow = null;
         this.navigator?.stop();
       };
       this._onRespawn = () => {
-        this._log('info', 'Respawned in survival world — resuming autonomous progression!');
+        this._needsBodyReconcile = true;
+        this._log('info', 'Respawned in survival world — re-syncing body & resuming progression!');
       };
       this.bot.on('death', this._onDeath);
       this.bot.on('spawn', this._onRespawn);
@@ -401,11 +622,26 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (!this._running) return;
       if (!this._loopBusy) {
         this._loopBusy = true;
+        let watchdogTimer = null;
         try {
-          await this.runSingleCycle();
+          await Promise.race([
+            this.runSingleCycle(),
+            new Promise((_, reject) => {
+              watchdogTimer = setTimeout(
+                () => reject(new Error(`Cycle exceeded ${this.cycleTimeoutMs}ms watchdog`)),
+                this.cycleTimeoutMs
+              );
+              watchdogTimer.unref?.();
+            })
+          ]);
         } catch (err) {
-          this._log('warn', `Recovered from cycle interruption: ${err.message}`);
+          if (String(err?.message || '').includes('watchdog')) {
+            await this._recoverFromStall(err.message);
+          } else {
+            this._log('warn', `Recovered from cycle interruption: ${err.message}`);
+          }
         } finally {
+          if (watchdogTimer) clearTimeout(watchdogTimer);
           this._loopBusy = false;
         }
       }
@@ -415,7 +651,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
     };
 
-    this._loopTimer = setTimeout(tick, 250);
+    this._loopTimer = setTimeout(tick, 120);
     this._loopTimer.unref?.();
   }
 
@@ -525,7 +761,8 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Handles hunger, nearby creepers/hostiles, and rain/hazard checks before every progression step.
+   * Handles underwater/drowning escape, hunger, nearby creepers/hostiles, and storm/hazard checks
+   * before every progression step.
    */
   async performSurvivalSelfCare() {
     if (!this.bot?.entity) return false;
@@ -537,6 +774,32 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
       await this.hazardMonitor.mitigateImmediateHazard();
       return true;
+    }
+
+    // 1b. Anti-drowning & deep-water shoreline escape
+    const oxygen = this.bot.oxygenLevel ?? 20;
+    const isSubmerged = Boolean(this.navigator?.isBotSubmerged?.());
+    const inWater = Boolean(this.navigator?.isBotInWater?.());
+    if (isSubmerged || oxygen < 15) {
+      if (typeof this.bot.setControlState === 'function') {
+        this.bot.setControlState('jump', true);
+      }
+      this._log(
+        'warn',
+        `Underwater / low oxygen (${oxygen}/20) — swimming to surface & nearest dry shoreline!`
+      );
+      if (typeof this.navigator?.swimToSafety === 'function') {
+        await this.navigator.swimToSafety(10000);
+      }
+      return true;
+    }
+    if (inWater && typeof this.navigator?.findNearestDryLand === 'function') {
+      const shore = this.navigator.findNearestDryLand(40);
+      if (shore && this.bot.entity.position && this.bot.entity.position.distanceTo(shore) > 2.2) {
+        this._log('info', 'Floating in water — swimming onto nearest dry shoreline...');
+        await this.navigator.swimToSafety(10000);
+        return true;
+      }
     }
 
     // 2. Hostile mob defense & Creeper blast evasion
@@ -705,6 +968,13 @@ class AutonomousProgressionEngine extends EventEmitter {
 
     for (const drop of drops) {
       if (!this.bot.entities[drop.id]) continue;
+      if (
+        typeof this.bot.blockAt === 'function' &&
+        (this.bot.oxygenLevel ?? 20) > 12 &&
+        this._isWaterBlockName(this.bot.blockAt(drop.position.floored())?.name)
+      ) {
+        this.navigator?.allowTemporaryDive?.(1400);
+      }
       await this._safeGotoNear(drop.position, 1, 3500);
     }
   }
@@ -753,15 +1023,23 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Establishes (or validates) a flat, dry Base Camp anchor near spawn.
+   * Establishes (or validates) a flat, dry Base Camp anchor near spawn (never in water!).
    */
   ensureBaseAnchor() {
     if (this.worldState.baseAnchor) {
-      // Verify the saved base anchor is within reasonable distance or in loaded world
       const saved = this.worldState.baseAnchor;
+      const savedVec = new Vec3(saved.x, saved.y, saved.z);
       const myPos = this.bot?.entity?.position;
-      if (!myPos || myPos.distanceTo(new Vec3(saved.x, saved.y, saved.z)) < 512) {
-        return new Vec3(saved.x, saved.y, saved.z);
+      const hasSavedStation = Boolean(
+        this.getValidStationBlock('craftingTable', 'crafting_table') ||
+          this.getValidStationBlock('furnace', 'furnace') ||
+          this.getValidStationBlock('blastFurnace', 'blast_furnace')
+      );
+      if (
+        (!myPos || myPos.distanceTo(savedVec) < 160) &&
+        (hasSavedStation || this._isDryStandableSpot(savedVec))
+      ) {
+        return savedVec;
       }
     }
 
@@ -771,24 +1049,13 @@ class AutonomousProgressionEngine extends EventEmitter {
 
     let bestPos = origin;
     if (typeof this.bot?.blockAt === 'function') {
-      outer: for (let r = 0; r <= 12; r += 2) {
+      outer: for (let r = 0; r <= 40; r += 2) {
         for (let dx = -r; dx <= r; dx += 2) {
           for (let dz = -r; dz <= r; dz += 2) {
-            for (let dy = 4; dy >= -6; dy--) {
+            if (r > 0 && Math.abs(dx) !== r && Math.abs(dz) !== r) continue;
+            for (let dy = 6; dy >= -6; dy--) {
               const cand = origin.offset(dx, dy, dz);
-              const ground = this.bot.blockAt(cand.offset(0, -1, 0));
-              const feet = this.bot.blockAt(cand);
-              const head = this.bot.blockAt(cand.offset(0, 1, 0));
-              if (
-                ground &&
-                ground.boundingBox === 'block' &&
-                !String(ground.name || '').includes('leaves') &&
-                feet &&
-                feet.boundingBox === 'empty' &&
-                !String(feet.name || '').includes('water') &&
-                head &&
-                head.boundingBox === 'empty'
-              ) {
+              if (this._isDryStandableSpot(cand)) {
                 bestPos = cand;
                 break outer;
               }
@@ -1322,6 +1589,69 @@ class AutonomousProgressionEngine extends EventEmitter {
   // LIVE VANILLA + SERVER-AUTHORITATIVE MODDED CRAFTING & SMELTING
   // ===========================================================================
 
+  /**
+   * Synchronizes client `prismarine-windows` state with the 1.20.1 server after bulk shift-clicks
+   * (`mode = 1` on `slot 0`) so client-side `window.slots[1..9]` never retain stale consumed stacks!
+   */
+  async _syncWindowSafe(window, maxWaitMs = 180) {
+    if (!this.bot?._client || !window) return;
+    if (typeof this.bot._syncWindow === 'function') {
+      let timer = null;
+      try {
+        await Promise.race([
+          this.bot._syncWindow(window),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, maxWaitMs);
+          })
+        ]);
+        return;
+      } catch (_) {
+        // Fall through to short settle wait
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    await this._delay(25);
+  }
+
+  /**
+   * Sweeps any leftover items on cursor (`selectedItem`) or inside crafting grid slots `1..maxGridSlot`
+   * (such as half-placed items persisted on a player body from a prior interrupted session) back into
+   * main inventory so no residual item can pollute the next recipe!
+   */
+  async _ensureCleanCraftingGrid(window, maxGridSlot = 4) {
+    if (!window || typeof this.bot?.clickWindow !== 'function') return;
+
+    if (window.selectedItem) {
+      const start = window.inventoryStart ?? (maxGridSlot + 1);
+      const end = window.inventoryEnd ?? window.slots.length;
+      let emptySlot = null;
+      for (let i = start; i < end; i++) {
+        if (!window.slots[i]) {
+          emptySlot = i;
+          break;
+        }
+      }
+      if (emptySlot !== null) {
+        await this.bot.clickWindow(emptySlot, 0, 0);
+      } else {
+        await this.bot.clickWindow(-999, 0, 0);
+      }
+    }
+
+    for (let g = 1; g <= maxGridSlot; g++) {
+      if (window.slots?.[g]) {
+        await this.bot.clickWindow(g, 0, 1);
+        if (window.slots?.[g]) {
+          await this.bot.clickWindow(g, 0, 0);
+          if (window.selectedItem) {
+            await this.bot.clickWindow(-999, 0, 0);
+          }
+        }
+      }
+    }
+  }
+
   async _waitForResultSlot(window, maxWaitMs = 90) {
     if (window.slots?.[0]) return true;
     if (typeof window.once === 'function') {
@@ -1331,7 +1661,6 @@ class AutonomousProgressionEngine extends EventEmitter {
           new Promise((resolve) => window.once('updateSlot:0', resolve)),
           new Promise((resolve) => {
             timer = setTimeout(resolve, Math.max(5, Math.round(maxWaitMs * this.actionDelayScale)));
-            timer.unref?.();
           })
         ]);
       } finally {
@@ -1365,6 +1694,8 @@ class AutonomousProgressionEngine extends EventEmitter {
     // On a live 1.20.1 connection, place the whole log stack into 2x2 slot 1 and shift-click slot 0 ONCE!
     if (this.bot?._client && this.bot?.clickWindow && this.bot?.inventory) {
       const inv = this.bot.inventory;
+      await this._ensureCleanCraftingGrid(inv, 4);
+
       const srcSlotObj = inv.slots
         .slice(inv.inventoryStart ?? 9, inv.inventoryEnd ?? inv.slots.length)
         .find((s) => s && matchesItemSpec(this.registryBridge.toCanonicalItemId(s), '#logs'));
@@ -1385,6 +1716,7 @@ class AutonomousProgressionEngine extends EventEmitter {
         await this._waitForResultSlot(inv, 120);
         if (inv.slots[0]) {
           await this.bot.clickWindow(0, 0, 1);
+          await this._syncWindowSafe(inv, 180);
         }
         if (inv.slots[1]) {
           await this.bot.clickWindow(1, 0, 1);
@@ -1654,8 +1986,11 @@ class AutonomousProgressionEngine extends EventEmitter {
     const canBulkStackShift = Boolean(this.bot?._client && !hasGtTool && times > 1);
     const outerIters = canBulkStackShift ? 1 : times;
     const perCellCount = canBulkStackShift ? times : 1;
+    const maxGridSlot = gridWidth * gridWidth;
 
     try {
+      await this._ensureCleanCraftingGrid(window, maxGridSlot);
+
       for (let iter = 0; iter < outerIters; iter++) {
         for (const { spec, destSlots } of specGroups.values()) {
           let heldFromSlot = null;
@@ -1667,6 +2002,7 @@ class AutonomousProgressionEngine extends EventEmitter {
                   .slice(window.inventoryStart ?? 10, window.inventoryEnd ?? window.slots.length)
                   .find((s) => s && matchesItemSpec(this.registryBridge.toCanonicalItemId(s), spec));
                 if (!srcSlotObj) {
+                  await this._ensureCleanCraftingGrid(window, maxGridSlot);
                   return false;
                 }
                 heldFromSlot = srcSlotObj.slot;
@@ -1681,13 +2017,17 @@ class AutonomousProgressionEngine extends EventEmitter {
           }
         }
 
-        await this._waitForResultSlot(window, 90);
+        const hasOutput = await this._waitForResultSlot(window, 110);
+        if (!hasOutput && !window.slots?.[0]) {
+          await this._ensureCleanCraftingGrid(window, maxGridSlot);
+          return false;
+        }
 
         // Shift-click result slot 0 (`mode = 1` quick_move) into player inventory
         await this.bot.clickWindow(0, 0, 1);
+        await this._syncWindowSafe(window, 180);
 
         // Reclaim any remaining GTCEu tools (Hammer, File, Wrench, Mortar) left in grid 1..9
-        const maxGridSlot = gridWidth * gridWidth;
         for (let g = 1; g <= maxGridSlot; g++) {
           if (window.slots[g]) {
             await this.bot.clickWindow(g, 0, 1);
@@ -1913,6 +2253,10 @@ class AutonomousProgressionEngine extends EventEmitter {
    * Executes one high-speed chained cycle of the autonomous GregTech Leisure progression ladder.
    */
   async runSingleCycle() {
+    if (this._needsBodyReconcile) {
+      await this.reconcileStateWithCurrentBody();
+    }
+
     if (await this.performSurvivalSelfCare()) {
       return { stage: 'SELF_CARE' };
     }

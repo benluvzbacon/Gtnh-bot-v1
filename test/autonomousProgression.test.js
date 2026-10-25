@@ -58,12 +58,14 @@ function createInteractiveSurvivalWorldHarness() {
       defaultState: customStateId || 48000,
       boundingBox: 'block'
     };
+    const bbox = blkEntry.boundingBox || 'block';
     voxels.set(keyOf(pos.x, pos.y, pos.z), {
       id: blkEntry.id,
       type: blkEntry.id,
       name,
       stateId: customStateId ?? blkEntry.defaultState ?? 1,
-      boundingBox: blkEntry.boundingBox || 'block',
+      boundingBox: bbox,
+      shapes: bbox === 'block' ? [[0, 0, 0, 1, 1, 1]] : [],
       position: pos
     });
   };
@@ -126,6 +128,7 @@ function createInteractiveSurvivalWorldHarness() {
       name: 'air',
       stateId: 0,
       boundingBox: 'empty',
+      shapes: [],
       position: new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z))
     };
   };
@@ -203,12 +206,18 @@ function createInteractiveSurvivalWorldHarness() {
     return rem === 0;
   };
 
+  const craftGrid2x2 = [null, null, null, null, null];
   bot.inventory = {
+    type: 'minecraft:inventory',
     inventoryStart: 9,
     inventoryEnd: 45,
     selectedItem: null,
+    craftGrid2x2,
     get slots() {
       const arr = new Array(46).fill(null);
+      for (let g = 0; g <= 4; g++) {
+        arr[g] = craftGrid2x2[g];
+      }
       invStacks.forEach((s, i) => {
         arr[9 + i] = { slot: 9 + i, type: s.type, name: s.name, count: s.count };
       });
@@ -771,3 +780,308 @@ test('AutonomousProgressionEngine plays from empty-handed spawn through Wood -> 
 
   agent.shutdown();
 });
+
+test('installFastWindowClickShim prevents Mineflayer 1.20.1 updateSlot:0 infinite hang on null->null crafting clicks & clears lastDigTime', async () => {
+  const { once } = require('events');
+  const { bot, addItem, bindRegistryBridge } = createInteractiveSurvivalWorldHarness();
+  bot._client = new EventEmitter(); // Enable live 1.20.1 crafting paths!
+  bot.lastDigTime = Date.now();
+
+  // Replace `openBlock` and `clickWindow` with Mineflayer `inventory.js`'s EXACT `waitForWindowUpdate`
+  // behavior: clicking slots 0..9 in `minecraft:crafting` awaits `once(window, 'updateSlot:0')`,
+  // while a real 1.20.1 server ONLY emits `updateSlot:0` when slot 0 ACTUALLY changes (`null -> item` or `item -> null`)!
+  const craftWindow = new EventEmitter();
+  craftWindow.id = 1;
+  craftWindow.type = 'minecraft:crafting';
+  craftWindow.inventoryStart = 10;
+  craftWindow.inventoryEnd = 46;
+  craftWindow.selectedItem = null;
+  craftWindow.slots = new Array(46).fill(null);
+
+  bot.openBlock = async () => {
+    // Sync player inventory into window slots 10..45
+    const items = bot.inventory.items();
+    for (let i = 0; i < 46; i++) craftWindow.slots[i] = null;
+    items.forEach((it, idx) => {
+      craftWindow.slots[10 + idx] = { ...it, slot: 10 + idx };
+    });
+    bot.currentWindow = craftWindow;
+    return craftWindow;
+  };
+  bot.closeWindow = async () => {
+    bot.currentWindow = null;
+  };
+
+  // Raw unshimmed `clickWindow` reproducing Mineflayer `inventory.js` lines 481-489 & 576
+  bot.clickWindow = async (slot, mouseButton, mode) => {
+    if (bot.lastDigTime != null && Date.now() - bot.lastDigTime < 500) {
+      throw new Error('lastDigTime was not cleared before clickWindow!');
+    }
+    const win = bot.currentWindow || bot.inventory;
+    const prevSlot0 = win.slots[0];
+
+    if (mode === 0 && mouseButton === 0) {
+      const tmp = win.slots[slot];
+      win.slots[slot] = win.selectedItem ? { ...win.selectedItem, slot } : null;
+      win.selectedItem = tmp ? { ...tmp } : null;
+    } else if (mode === 0 && mouseButton === 1 && win.selectedItem) {
+      if (!win.slots[slot]) {
+        win.slots[slot] = { ...win.selectedItem, count: 1, slot };
+      } else {
+        win.slots[slot].count += 1;
+      }
+      win.selectedItem.count -= 1;
+      if (win.selectedItem.count <= 0) win.selectedItem = null;
+    } else if (mode === 1 && slot === 0 && win.slots[0]) {
+      addItem(`minecraft:${win.slots[0].name}`, win.slots[0].count);
+      for (let g = 1; g <= 9; g++) win.slots[g] = null;
+      win.slots[0] = null;
+    } else if (mode === 1 && slot >= 1 && slot <= 9 && win.slots[slot]) {
+      win.slots[slot] = null;
+    }
+
+    // Real 1.20.1 server furnace check: ONLY sets slot 0 when ALL 8 cobblestones are placed!
+    // Clicks 1..7 leave slot 0 `null -> null` and emit ZERO `updateSlot:0` packet!
+    const cobbleCells = [1, 2, 3, 4, 6, 7, 8, 9].every(
+      (idx) => win.slots[idx]?.name === 'cobblestone' && !win.slots[5]
+    );
+    const nextSlot0 = cobbleCells ? { type: 200, name: 'furnace', count: 1, slot: 0 } : null;
+    win.slots[0] = nextSlot0;
+    if (Boolean(prevSlot0) !== Boolean(nextSlot0)) {
+      setImmediate(() => win.emit('updateSlot:0', prevSlot0, nextSlot0));
+    }
+
+    if (win.type === 'minecraft:crafting' && slot >= 0 && slot <= 9) {
+      await once(win, 'updateSlot:0');
+    }
+  };
+
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: false
+  });
+  bindRegistryBridge(agent.registryBridge);
+  agent.attachBot(bot, {
+    progressionOptions: { persistState: false, actionDelayScale: 0, slot0TimeoutMs: 12 }
+  });
+
+  // Place crafting_table in world and give 8 cobblestone
+  agent.progressionEngine.worldState.stations.craftingTable = { x: 2, y: 64, z: 0 };
+  const tableId = bot.registry.blocksByName.crafting_table.id;
+  bot.blockAt(new Vec3(2, 64, 0));
+  // Ensure getValidStationBlock sees a crafting_table at (2, 64, 0)
+  const origBlockAt = bot.blockAt;
+  bot.blockAt = (pos) => {
+    if (Math.floor(pos.x) === 2 && Math.floor(pos.y) === 64 && Math.floor(pos.z) === 0) {
+      return { id: tableId, type: tableId, name: 'crafting_table', boundingBox: 'block', position: new Vec3(2, 64, 0) };
+    }
+    return origBlockAt(pos);
+  };
+
+  addItem('minecraft:cobblestone', 8);
+
+  const startedAt = Date.now();
+  const crafted = await agent.progressionEngine.craftVanillaItem('furnace', 1, true);
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(crafted, true, 'Furnace craft must complete without hanging on null->null clicks 1..7');
+  assert.ok(elapsed < 1500, `Expected fast non-hanging craft (<1500ms), took ${elapsed}ms`);
+  assert.equal(agent.progressionEngine.countInventory('minecraft:furnace'), 1);
+
+  agent.shutdown();
+});
+
+test('Same-body reconnect cleans leftover 2x2 grid items, discovers placed stations, fast-forwards existing tools, and rolls back stale milestones', async () => {
+  const { bot, voxels, addItem, bindRegistryBridge } = createInteractiveSurvivalWorldHarness();
+
+  // Place pre-existing Crafting Table & Furnace near the reconnecting player body (as if placed in prior session)
+  const ctEntry = bot.registry.blocksByName.crafting_table;
+  const furEntry = bot.registry.blocksByName.furnace;
+  voxels.set('3,64,0', {
+    id: ctEntry.id,
+    type: ctEntry.id,
+    name: 'crafting_table',
+    stateId: ctEntry.defaultState,
+    boundingBox: 'block',
+    position: new Vec3(3, 64, 0)
+  });
+  voxels.set('3,64,1', {
+    id: furEntry.id,
+    type: furEntry.id,
+    name: 'furnace',
+    stateId: furEntry.defaultState,
+    boundingBox: 'block',
+    position: new Vec3(3, 64, 1)
+  });
+
+  // Previous body already holds Stone Pickaxe + Stone Axe + leftover planks stuck in 2x2 slot 2 from Ctrl+C!
+  addItem('minecraft:stone_pickaxe', 1);
+  addItem('minecraft:stone_axe', 1);
+  bot.inventory.craftGrid2x2[2] = {
+    type: bot.registry.itemsByName.oak_planks.id,
+    name: 'oak_planks',
+    count: 3,
+    slot: 2
+  };
+  let cleanedSlot2 = false;
+  const origClick = bot.clickWindow;
+  bot.clickWindow = async (slot, mouseButton, mode) => {
+    if (slot === 2 && mode === 1 && bot.inventory.craftGrid2x2[2]) {
+      addItem('minecraft:oak_planks', bot.inventory.craftGrid2x2[2].count);
+      bot.inventory.craftGrid2x2[2] = null;
+      cleanedSlot2 = true;
+      return;
+    }
+    return origClick ? origClick(slot, mouseButton, mode) : undefined;
+  };
+
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: true
+  });
+  bindRegistryBridge(agent.registryBridge);
+  agent.attachBot(bot, {
+    progressionOptions: { persistState: false, actionDelayScale: 0 }
+  });
+
+  // Simulate stale `.gtl-runtime-state.json` falsely claiming M05 Blast Furnace was built in an old world
+  agent.progressionEngine.worldState.completedMilestones = ['M05_FAST_BLAST_FURNACE_AND_IRON_KIT'];
+  agent.progressionEngine.worldState.baseAnchor = { x: 999, y: 64, z: 999 }; // stale far-away anchor!
+
+  // Also verify single-controller guarantee on `spawn`: `AutonomousProgressionEngine` runs, `BotStateMachine` stays off!
+  bot.emit('spawn');
+  agent.progressionEngine.stop(); // pause background timer so we inspect deterministic reconcile step
+  assert.equal(
+    agent.stateMachineBundle,
+    null,
+    'BotStateMachine must NOT run concurrently with AutonomousProgressionEngine on spawn'
+  );
+
+  await agent.progressionEngine.reconcileStateWithCurrentBody();
+
+  assert.equal(cleanedSlot2, true, 'Must sweep leftover item out of 2x2 crafting grid slot 2 on reconnect');
+  assert.ok(
+    agent.progressionEngine.getValidStationBlock('craftingTable', 'crafting_table'),
+    'Must auto-discover existing Crafting Table near previous body'
+  );
+  assert.ok(
+    agent.progressionEngine.getValidStationBlock('furnace', 'furnace'),
+    'Must auto-discover existing Furnace near previous body'
+  );
+  assert.ok(
+    agent.progressionEngine.hasMilestone('M01_WOOD_BOOTSTRAP') &&
+      agent.progressionEngine.hasMilestone('M02_BASE_AND_CRAFTING_TABLE') &&
+      agent.progressionEngine.hasMilestone('M03_STONE_TOOLS_AND_FURNACE'),
+    'Must fast-forward M01..M03 when previous body already holds stone tools & furnace'
+  );
+  assert.equal(
+    agent.progressionEngine.hasMilestone('M05_FAST_BLAST_FURNACE_AND_IRON_KIT'),
+    false,
+    'Must roll back stale M05 milestone when no Blast Furnace exists in world or inventory'
+  );
+
+  agent.shutdown();
+});
+
+test('GTNHNavigator & AutonomousProgressionEngine swim upward from 4-block-deep water, hop 2-block-deep shorelines, hold buoyancy jump, and anchor Base Camp on dry land', async () => {
+  const { bot, voxels, bindRegistryBridge } = createInteractiveSurvivalWorldHarness();
+
+  // Carve a 4-block-deep lake (`x = -4..4, z = -4..4`, water at `y = 60..63`, solid lakebed at `y = 59`,
+  // surrounded by steep grass banks at `x = ±5` where `y = 63` is `grass_block` next to `y = 60..63` deep water!)
+  const waterEntry = bot.registry.blocksByName.water;
+  for (let x = -4; x <= 4; x++) {
+    for (let z = -4; z <= 4; z++) {
+      for (let y = 60; y <= 63; y++) {
+        voxels.set(`${x},${y},${z}`, {
+          id: waterEntry.id,
+          type: waterEntry.id,
+          name: 'water',
+          stateId: waterEntry.defaultState,
+          boundingBox: 'empty',
+          shapes: [],
+          position: new Vec3(x, y, z)
+        });
+      }
+    }
+  }
+
+  // Place bot submerged at the bottom of the lake (`y = 60`, 4 blocks underwater!)
+  bot.entity.position = new Vec3(0.5, 60, 0.5);
+  bot.entity.isInWater = true;
+  bot.oxygenLevel = 11;
+
+  const controlStates = { jump: false, forward: false, sprint: false };
+  bot.setControlState = (state, val) => {
+    controlStates[state] = Boolean(val);
+  };
+
+  // Wire pathfinder `goto` to verify real A* path generation using `navigator.movements`!
+  const { goals } = require('mineflayer-pathfinder');
+  bot.pathfinder = {
+    thinkTimeout: 5000,
+    movements: null,
+    setMovements(m) {
+      this.movements = m;
+    },
+    setGoal() {},
+    stop() {},
+    isMoving: () => false,
+    goto: async (goal) => {
+      // Move bot to goal and clear water flag once ashore
+      bot.entity.position = new Vec3(goal.x + 0.5, goal.y, goal.z + 0.5);
+      bot.entity.isInWater = false;
+      bot.oxygenLevel = 20;
+    }
+  };
+
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: false
+  });
+  bindRegistryBridge(agent.registryBridge);
+  agent.attachBot(bot, {
+    progressionOptions: { persistState: false, actionDelayScale: 0 }
+  });
+
+  const nav = agent.navigator;
+  const moves = nav.configureMovements();
+
+  // 1. Verify `getMoveUp` from lakebed `(0, 60, 0)` emits upward swim neighbor `(0, 61, 0)`!
+  const upNeighbors = [];
+  moves.getMoveUp(new Vec3(0, 60, 0), upNeighbors);
+  assert.ok(
+    upNeighbors.some((m) => m.x === 0 && m.y === 61 && m.z === 0),
+    'Submerged bot at y=60 must generate upward swim Move to y=61'
+  );
+
+  // 2. Verify `getMoveJumpUp` from deep shoreline surface `(4, 63, 0)` (with water at `y=62` below!)
+  // emits shore-exit hop onto grass bank `(5, 64, 0)`!
+  const shoreNeighbors = [];
+  moves.getMoveJumpUp(new Vec3(4, 63, 0), { x: 1, z: 0 }, shoreNeighbors);
+  assert.ok(
+    shoreNeighbors.some((m) => m.x === 5 && m.y === 64 && m.z === 0),
+    'Floating bot at deep water edge (4,63,0) must generate shore-exit Move onto (5,64,0)'
+  );
+
+  // 3. Verify `physicsTick` buoyancy reflex holds `jump = true` in water and releases it on dry land
+  bot.emit('physicsTick');
+  assert.equal(controlStates.jump, true, 'Swim reflex must hold jump=true while in water');
+
+  // 4. Verify `AutonomousProgressionEngine` escapes underwater spawn onto dry shore and anchors Base Camp on DRY land!
+  const cycleRes = await agent.progressionEngine.runSingleCycle();
+  assert.equal( nav.isBotInWater(), false, 'Bot must swim out onto dry shore');
+  const anchor = agent.progressionEngine.ensureBaseAnchor();
+  assert.equal(
+    agent.progressionEngine._isDryStandableSpot(anchor),
+    true,
+    `Base Camp anchor (${anchor.x}, ${anchor.y}, ${anchor.z}) must be on dry standable land, never in water`
+  );
+
+  // Tick once on dry land -> `jump` cleanly released!
+  bot.emit('physicsTick');
+  assert.equal(controlStates.jump, false, 'Swim reflex must release jump=false once on dry land');
+  assert.ok(cycleRes);
+
+  agent.shutdown();
+});
+

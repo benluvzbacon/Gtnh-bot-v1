@@ -26,7 +26,8 @@ const { MultiblockBuilder } = require('./multiblockBuilder');
 const { HazardMonitor } = require('./hazards/hazardMonitor');
 const {
   buildGTLStateMachine,
-  installPhysicTickDeprecationShim
+  installPhysicTickDeprecationShim,
+  installFastWindowClickShim
 } = require('./statemachine/hierarchy');
 const { AutonomousProgressionEngine } = require('./survival/autonomousProgression');
 
@@ -254,6 +255,7 @@ class GTLAutomationAgent extends EventEmitter {
   attachBot(bot, options = {}) {
     this.bot = bot;
     installPhysicTickDeprecationShim(bot);
+    installFastWindowClickShim(bot);
     const fmlMarker = options.fmlMarker || this._activeFmlMarker || '\0FML3\0';
 
     if (!this.fmlSession && bot._client && this.config.forgeBridgeMode !== 'vanilla') {
@@ -342,6 +344,7 @@ class GTLAutomationAgent extends EventEmitter {
     } else if (typeof bot.once === 'function') {
       bot.once('spawn', () => {
         this._reconnectAttempts = 0;
+        installFastWindowClickShim(bot);
         if (bot.registry) {
           this.registryBridge.syncToBotRegistry(bot.registry);
         }
@@ -350,12 +353,17 @@ class GTLAutomationAgent extends EventEmitter {
           level: 'info',
           message: `[Forge1201] Spawned in GregTech Leisure world${pos ? ` at (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})` : ''}!`
         });
-        this._initStateMachine(options.stateMachineOptions);
-        if (
+
+        const useAutonomousEngine =
           options.enableAutonomousSurvival !== false &&
-          this.config.enableAutonomousSurvival !== false
-        ) {
+          this.config.enableAutonomousSurvival !== false;
+
+        if (useAutonomousEngine) {
+          // Single-controller guarantee: do NOT start `BotStateMachine` concurrently with
+          // `AutonomousProgressionEngine` so both systems never fight over `bot.pathfinder`!
           this.progressionEngine.start();
+        } else {
+          this._initStateMachine(options.stateMachineOptions);
         }
         this.emit('ready', { position: pos });
       });
@@ -515,6 +523,9 @@ class GTLAutomationAgent extends EventEmitter {
     }
     if (this.navigator) {
       this.navigator.stop();
+      if (typeof this.navigator.detach === 'function') {
+        this.navigator.detach();
+      }
     }
     if (this.bot && typeof this.bot.quit === 'function') {
       this.bot.quit('GTL Bot graceful shutdown');
