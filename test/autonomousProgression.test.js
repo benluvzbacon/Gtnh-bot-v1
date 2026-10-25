@@ -1,0 +1,729 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { EventEmitter } = require('events');
+const Vec3 = require('vec3');
+const prismarineRegistry = require('prismarine-registry');
+const mcData = require('minecraft-data')('1.20.1');
+
+const { GTLAutomationAgent } = require('../src/bot');
+const { installPhysicTickDeprecationShim } = require('../src/statemachine/hierarchy');
+const {
+  AutonomousProgressionEngine,
+  matchesItemSpec
+} = require('../src/survival/autonomousProgression');
+
+/**
+ * Builds an interactive stateful 3D survival world + live Crafting Table / Furnace / Blast Furnace
+ * harness so `AutonomousProgressionEngine` executes genuine survival milestones from an empty inventory!
+ */
+function createInteractiveSurvivalWorldHarness() {
+  const bot = new EventEmitter();
+  bot.version = '1.20.1';
+  bot.registry = prismarineRegistry('1.20.1');
+
+  bot.entity = {
+    position: new Vec3(0.5, 64, 0.5),
+    velocity: new Vec3(0, 0, 0),
+    height: 1.8,
+    effects: {}
+  };
+  bot.entities = {};
+  bot.health = 20;
+  bot.food = 20;
+  bot.heldItem = null;
+
+  // Track any deprecation warnings if `physicTick` is ever registered raw
+  const deprecationWarnings = [];
+  bot.on('newListener', (event) => {
+    if (event === 'physicTick') {
+      deprecationWarnings.push("Deprecated: 'physicTick' event is deprecated");
+    }
+  });
+
+  // World voxel map: "x,y,z" -> { id, name, stateId, boundingBox, position }
+  const voxels = new Map();
+  const keyOf = (x, y, z) => `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+
+  const setBlock = (x, y, z, name, customStateId = null) => {
+    const pos = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
+    if (name === 'air') {
+      voxels.delete(keyOf(pos.x, pos.y, pos.z));
+      return;
+    }
+    const blkEntry = bot.registry.blocksByName[name] || {
+      id: 900,
+      name,
+      defaultState: customStateId || 48000,
+      boundingBox: 'block'
+    };
+    voxels.set(keyOf(pos.x, pos.y, pos.z), {
+      id: blkEntry.id,
+      type: blkEntry.id,
+      name,
+      stateId: customStateId ?? blkEntry.defaultState ?? 1,
+      boundingBox: blkEntry.boundingBox || 'block',
+      position: pos
+    });
+  };
+
+  // Flat bedrock/stone/grass terrain around (-24..24, y=20..63, -24..24)
+  for (let x = -20; x <= 20; x++) {
+    for (let z = -20; z <= 20; z++) {
+      setBlock(x, 63, z, 'grass_block');
+      for (let y = 58; y <= 62; y++) {
+        setBlock(x, y, z, 'stone');
+      }
+    }
+  }
+
+  // Five Oak Trees around spawn -> 20 oak_log (80 planks) for crafting + starter fuel
+  for (const [tx, tz] of [
+    [6, 6],
+    [8, 6],
+    [10, 6],
+    [6, 9],
+    [8, 9]
+  ]) {
+    for (let dy = 0; dy < 4; dy++) {
+      setBlock(tx, 64 + dy, tz, 'oak_log');
+    }
+  }
+
+  // Surface Clay patch at (-8, 63, 6..-6) -> 20 clay blocks
+  for (let i = 0; i < 8; i++) {
+    setBlock(-8, 63, i, 'clay');
+  }
+
+  // Underground Iron vein (`iron_ore` at y=60 -> 20 blocks = 40 raw_iron)
+  for (let i = 0; i < 20; i++) {
+    setBlock(-12 + (i % 5), 60, -10 - Math.floor(i / 5), 'iron_ore');
+  }
+
+  // Underground MODDED GTCEu 3x3-chunk veins (`stateId > vanillaMaxStateId` embedded in `stone`!):
+  // - stateId 48120 = gtceu:chalcopyrite_ore (drops `gtceu:raw_chalcopyrite` -> Copper!)
+  // - stateId 49310 = gtceu:cassiterite_ore (drops `gtceu:raw_cassiterite` -> Tin!)
+  for (let x = 12; x <= 16; x++) {
+    for (let z = -14; z <= -10; z++) {
+      setBlock(x, 59, z, 'stone');
+      setBlock(x, 61, z, 'stone');
+    }
+  }
+  for (let i = 0; i < 10; i++) {
+    setBlock(13 + (i % 3), 60, -13 + Math.floor(i / 4), 'gtceu:chalcopyrite_ore', 48120);
+  }
+  for (let i = 0; i < 6; i++) {
+    setBlock(15, 60, -13 + i, 'gtceu:cassiterite_ore', 49310);
+  }
+
+  bot.blockAt = (pos) => {
+    const k = keyOf(pos.x, pos.y, pos.z);
+    if (voxels.has(k)) return voxels.get(k);
+    return {
+      id: 0,
+      type: 0,
+      name: 'air',
+      stateId: 0,
+      boundingBox: 'empty',
+      position: new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z))
+    };
+  };
+
+  bot.findBlocks = ({ matching, maxDistance = 64, count = 16 }) => {
+    const matchSet = new Set(Array.isArray(matching) ? matching : [matching]);
+    const center = bot.entity.position;
+    const out = [];
+    for (const blk of voxels.values()) {
+      if (matchSet.has(blk.id) && blk.position.distanceTo(center) <= maxDistance) {
+        out.push(blk.position.clone());
+      }
+    }
+    out.sort((a, b) => a.distanceTo(center) - b.distanceTo(center));
+    return out.slice(0, count);
+  };
+
+  bot.findBlock = (opts) => {
+    const list = bot.findBlocks({ ...opts, count: 1 });
+    return list.length > 0 ? bot.blockAt(list[0]) : null;
+  };
+
+  // Stateful Player Inventory (`slots 9..44`)
+  const invStacks = []; // [{ type, name, count }]
+  let registryBridgeRef = null;
+
+  const resolveItemEntry = (canonicalName) => {
+    const full = canonicalName.includes(':') ? canonicalName : `minecraft:${canonicalName}`;
+    const short = full.replace(/^minecraft:/, '');
+    if (bot.registry.itemsByName[short]) {
+      return { id: bot.registry.itemsByName[short].id, name: short };
+    }
+    if (bot.registry.itemsByName[full]) {
+      return { id: bot.registry.itemsByName[full].id, name: full };
+    }
+    const bridged = registryBridgeRef?.itemNameToNumeric?.get(full);
+    if (bridged !== null && bridged !== undefined) {
+      return { id: bridged, name: full };
+    }
+    return { id: 25000, name: full };
+  };
+
+  const addItem = (canonicalName, count = 1) => {
+    const entry = resolveItemEntry(canonicalName);
+    const existing = invStacks.find((s) => s.type === entry.id && s.name === entry.name);
+    if (existing) {
+      existing.count += count;
+    } else {
+      invStacks.push({ type: entry.id, name: entry.name, count });
+    }
+  };
+
+  const removeItemByType = (typeId, count = 1) => {
+    const idx = invStacks.findIndex((s) => s.type === typeId);
+    if (idx === -1) return false;
+    if (invStacks[idx].count < count) return false;
+    invStacks[idx].count -= count;
+    if (invStacks[idx].count <= 0) invStacks.splice(idx, 1);
+    return true;
+  };
+
+  const removeMatchingSpec = (spec, count = 1) => {
+    let rem = count;
+    for (let i = invStacks.length - 1; i >= 0 && rem > 0; i--) {
+      const canonical = invStacks[i].name.includes(':')
+        ? invStacks[i].name
+        : `minecraft:${invStacks[i].name}`;
+      if (matchesItemSpec(canonical, spec)) {
+        const take = Math.min(rem, invStacks[i].count);
+        invStacks[i].count -= take;
+        rem -= take;
+        if (invStacks[i].count <= 0) invStacks.splice(i, 1);
+      }
+    }
+    return rem === 0;
+  };
+
+  bot.inventory = {
+    inventoryStart: 9,
+    inventoryEnd: 45,
+    selectedItem: null,
+    get slots() {
+      const arr = new Array(46).fill(null);
+      invStacks.forEach((s, i) => {
+        arr[9 + i] = { slot: 9 + i, type: s.type, name: s.name, count: s.count };
+      });
+      return arr;
+    },
+    items: () =>
+      invStacks.map((s, i) => ({
+        slot: 9 + i,
+        type: s.type,
+        name: s.name,
+        count: s.count
+      }))
+  };
+
+  bot.equip = async (item) => {
+    bot.heldItem = item;
+  };
+
+  bot.consume = async () => {
+    if (bot.heldItem) {
+      removeItemByType(bot.heldItem.type, 1);
+      bot.food = Math.min(20, bot.food + 8);
+    }
+  };
+
+  bot.pathfinder = {
+    setMovements: () => {},
+    setGoal: () => {},
+    goto: async (goal) => {
+      if (typeof goal.x === 'number' && typeof goal.z === 'number') {
+        bot.entity.position = new Vec3(goal.x + 0.5, goal.y ?? 64, goal.z + 0.5);
+      }
+    }
+  };
+
+  bot.dig = async (block) => {
+    const blk = bot.blockAt(block.position);
+    if (!blk || blk.type === 0) return;
+    setBlock(blk.position.x, blk.position.y, blk.position.z, 'air');
+    if (blk.name === 'oak_log') addItem('minecraft:oak_log', 1);
+    else if (blk.name === 'stone' || blk.name === 'cobblestone') addItem('minecraft:cobblestone', 1);
+    else if (blk.name === 'clay') addItem('minecraft:clay_ball', 4);
+    else if (blk.name === 'iron_ore') addItem('minecraft:raw_iron', 2);
+    else if (blk.stateId === 48120) addItem('gtceu:raw_chalcopyrite', 3);
+    else if (blk.stateId === 49310) addItem('gtceu:raw_cassiterite', 3);
+  };
+
+  bot.placeBlock = async (refBlock, faceVec) => {
+    if (!bot.heldItem) throw new Error('Nothing equipped to place');
+    const target = refBlock.position.plus(faceVec);
+    const placeName = bot.heldItem.name;
+    removeItemByType(bot.heldItem.type, 1);
+    setBlock(target.x, target.y, target.z, placeName);
+  };
+
+  // Vanilla `recipesFor` + `craft`
+  const VANILLA_RECIPES = {
+    oak_planks: { in: [['#logs', 1]], out: ['minecraft:oak_planks', 4], table: false },
+    stick: { in: [['#planks', 2]], out: ['minecraft:stick', 4], table: false },
+    crafting_table: { in: [['#planks', 4]], out: ['minecraft:crafting_table', 1], table: false },
+    wooden_pickaxe: {
+      in: [['#planks', 3], ['minecraft:stick', 2]],
+      out: ['minecraft:wooden_pickaxe', 1],
+      table: true
+    },
+    stone_pickaxe: {
+      in: [['#cobblestone', 3], ['minecraft:stick', 2]],
+      out: ['minecraft:stone_pickaxe', 1],
+      table: true
+    },
+    stone_axe: {
+      in: [['#cobblestone', 3], ['minecraft:stick', 2]],
+      out: ['minecraft:stone_axe', 1],
+      table: true
+    },
+    stone_sword: {
+      in: [['#cobblestone', 2], ['minecraft:stick', 1]],
+      out: ['minecraft:stone_sword', 1],
+      table: true
+    },
+    furnace: { in: [['#cobblestone', 8]], out: ['minecraft:furnace', 1], table: true },
+    chest: { in: [['#planks', 8]], out: ['minecraft:chest', 1], table: true },
+    iron_pickaxe: {
+      in: [['minecraft:iron_ingot', 3], ['minecraft:stick', 2]],
+      out: ['minecraft:iron_pickaxe', 1],
+      table: true
+    },
+    bucket: { in: [['minecraft:iron_ingot', 3]], out: ['minecraft:bucket', 1], table: true },
+    blast_furnace: {
+      in: [
+        ['minecraft:iron_ingot', 5],
+        ['minecraft:furnace', 1],
+        ['minecraft:smooth_stone', 3]
+      ],
+      out: ['minecraft:blast_furnace', 1],
+      table: true
+    },
+    bricks: { in: [['minecraft:brick', 4]], out: ['minecraft:bricks', 1], table: false }
+  };
+
+  bot.recipesFor = (itemId, _meta, _minResult, craftingTable) => {
+    const itemObj = mcData.items[itemId];
+    if (!itemObj) return [];
+    const rule = VANILLA_RECIPES[itemObj.name];
+    if (!rule) return [];
+    if (rule.table && !craftingTable) return [];
+    for (const [spec, qty] of rule.in) {
+      let have = 0;
+      for (const s of invStacks) {
+        const cid = s.name.includes(':') ? s.name : `minecraft:${s.name}`;
+        if (matchesItemSpec(cid, spec)) have += s.count;
+      }
+      if (have < qty) return [];
+    }
+    return [{ id: itemObj.name, rule }];
+  };
+
+  bot.craft = async (recipe, count = 1) => {
+    for (let i = 0; i < count; i++) {
+      for (const [spec, qty] of recipe.rule.in) {
+        if (!removeMatchingSpec(spec, qty)) throw new Error(`Missing ${spec}`);
+      }
+      addItem(recipe.rule.out[0], recipe.rule.out[1]);
+    }
+  };
+
+  // Server-authoritative 3x3 Crafting Table window (`openBlock` + `clickWindow`)
+  let activeCraftWindow = null;
+
+  const evaluateModded3x3Result = (gridSlots) => {
+    const names = gridSlots.map((s) => (s ? (s.name.includes(':') ? s.name : `minecraft:${s.name}`) : null));
+    const nonNull = names.filter(Boolean);
+
+    // Iron Hammer: 6 iron_ingot + 1 stick
+    if (
+      nonNull.length === 7 &&
+      nonNull.filter((n) => n === 'minecraft:iron_ingot').length === 6 &&
+      nonNull.includes('minecraft:stick')
+    ) {
+      return { item: 'gtceu:iron_hammer', count: 1, keepToolSlots: [] };
+    }
+    // Iron Mortar: 2 iron_ingot + 5 stone
+    if (
+      nonNull.length === 7 &&
+      nonNull.filter((n) => n === 'minecraft:iron_ingot').length === 2 &&
+      nonNull.filter((n) => n === 'minecraft:stone').length === 5
+    ) {
+      return { item: 'gtceu:iron_mortar', count: 1, keepToolSlots: [] };
+    }
+    // Hammer + 2 Iron Ingot -> Iron Plate (Hammer stays in grid!)
+    if (
+      nonNull.length === 3 &&
+      nonNull.some((n) => n.endsWith('_hammer')) &&
+      nonNull.filter((n) => n === 'minecraft:iron_ingot').length === 2
+    ) {
+      return {
+        item: 'gtceu:iron_plate',
+        count: 1,
+        keepToolSlots: names.map((n, idx) => (n && n.endsWith('_hammer') ? idx + 1 : -1)).filter((v) => v > 0)
+      };
+    }
+    // Hammer + 2 Bronze Ingot -> Bronze Plate (Hammer stays in grid!)
+    if (
+      nonNull.length === 3 &&
+      nonNull.some((n) => n.endsWith('_hammer')) &&
+      nonNull.filter((n) => n === 'gtceu:bronze_ingot').length === 2
+    ) {
+      return {
+        item: 'gtceu:bronze_plate',
+        count: 1,
+        keepToolSlots: names.map((n, idx) => (n && n.endsWith('_hammer') ? idx + 1 : -1)).filter((v) => v > 0)
+      };
+    }
+    // Iron Wrench: 6 iron_plate + Hammer
+    if (
+      nonNull.length === 7 &&
+      nonNull.some((n) => n.endsWith('_hammer')) &&
+      nonNull.filter((n) => n === 'gtceu:iron_plate').length === 6
+    ) {
+      return {
+        item: 'gtceu:iron_wrench',
+        count: 1,
+        keepToolSlots: names.map((n, idx) => (n && n.endsWith('_hammer') ? idx + 1 : -1)).filter((v) => v > 0)
+      };
+    }
+    // Iron File: 2 iron_plate + 1 stick
+    if (
+      nonNull.length === 3 &&
+      nonNull.filter((n) => n === 'gtceu:iron_plate').length === 2 &&
+      nonNull.includes('minecraft:stick')
+    ) {
+      return { item: 'gtceu:iron_file', count: 1, keepToolSlots: [] };
+    }
+    // Mortar + Copper Ingot -> Copper Dust
+    if (nonNull.length === 2 && nonNull.some((n) => n.endsWith('_mortar')) && nonNull.includes('minecraft:copper_ingot')) {
+      return {
+        item: 'gtceu:copper_dust',
+        count: 1,
+        keepToolSlots: names.map((n, idx) => (n && n.endsWith('_mortar') ? idx + 1 : -1)).filter((v) => v > 0)
+      };
+    }
+    // Mortar + Tin Ingot -> Tin Dust
+    if (nonNull.length === 2 && nonNull.some((n) => n.endsWith('_mortar')) && nonNull.includes('gtceu:tin_ingot')) {
+      return {
+        item: 'gtceu:tin_dust',
+        count: 1,
+        keepToolSlots: names.map((n, idx) => (n && n.endsWith('_mortar') ? idx + 1 : -1)).filter((v) => v > 0)
+      };
+    }
+    // 3 Copper Dust + 1 Tin Dust -> 4 Bronze Dust
+    if (
+      nonNull.length === 4 &&
+      nonNull.filter((n) => n === 'gtceu:copper_dust').length === 3 &&
+      nonNull.includes('gtceu:tin_dust')
+    ) {
+      return { item: 'gtceu:bronze_dust', count: 4, keepToolSlots: [] };
+    }
+    // LP Steam Solid Boiler: 5 bronze_plate + wrench + 2 bricks + 1 furnace
+    if (
+      nonNull.length === 9 &&
+      nonNull.filter((n) => n === 'gtceu:bronze_plate').length === 5 &&
+      nonNull.some((n) => n.endsWith('_wrench')) &&
+      nonNull.filter((n) => n === 'minecraft:bricks').length === 2 &&
+      nonNull.includes('minecraft:furnace')
+    ) {
+      return {
+        item: 'gtceu:lp_steam_solid_boiler',
+        count: 1,
+        keepToolSlots: names.map((n, idx) => (n && n.endsWith('_wrench') ? idx + 1 : -1)).filter((v) => v > 0)
+      };
+    }
+    return null;
+  };
+
+  const buildCraftWindow = (gridSize = 9) => {
+    const win = {
+      inventoryStart: 1 + gridSize,
+      inventoryEnd: 1 + gridSize + 36,
+      selectedItem: null,
+      grid: new Array(gridSize).fill(null),
+      resultMeta: null,
+      get slots() {
+        const s = new Array(1 + gridSize + 36).fill(null);
+        const evalRes = evaluateModded3x3Result(this.grid);
+        this.resultMeta = evalRes;
+        if (evalRes) {
+          const entry = resolveItemEntry(evalRes.item);
+          s[0] = { slot: 0, type: entry.id, name: entry.name, count: evalRes.count };
+        }
+        for (let g = 0; g < gridSize; g++) {
+          if (this.grid[g]) s[1 + g] = { slot: 1 + g, ...this.grid[g] };
+        }
+        invStacks.forEach((st, i) => {
+          s[1 + gridSize + i] = {
+            slot: 1 + gridSize + i,
+            type: st.type,
+            name: st.name,
+            count: st.count
+          };
+        });
+        return s;
+      }
+    };
+    return win;
+  };
+
+  bot.openBlock = async () => {
+    activeCraftWindow = buildCraftWindow(9);
+    return activeCraftWindow;
+  };
+
+  bot.closeWindow = async () => {
+    activeCraftWindow = null;
+  };
+
+  bot.clickWindow = async (slot, mouseButton, mode) => {
+    if (!activeCraftWindow) {
+      activeCraftWindow = buildCraftWindow(4);
+    }
+    const win = activeCraftWindow;
+    const gridEnd = win.inventoryStart - 1;
+
+    if (slot === 0 && mode === 1) {
+      const res = evaluateModded3x3Result(win.grid);
+      if (res) {
+        addItem(res.item, res.count);
+        for (let g = 0; g < win.grid.length; g++) {
+          if (win.grid[g] && !res.keepToolSlots.includes(g + 1)) {
+            win.grid[g].count -= 1;
+            if (win.grid[g].count <= 0) win.grid[g] = null;
+          }
+        }
+      }
+      return;
+    }
+
+    if (slot >= 1 && slot <= gridEnd && mode === 1) {
+      const gItem = win.grid[slot - 1];
+      if (gItem) {
+        addItem(gItem.name, gItem.count);
+        win.grid[slot - 1] = null;
+      }
+      return;
+    }
+
+    if (slot >= win.inventoryStart && mode === 0 && mouseButton === 0) {
+      if (!win.selectedItem) {
+        const idx = slot - win.inventoryStart;
+        const st = invStacks[idx];
+        if (st) {
+          win.selectedItem = { ...st };
+          invStacks.splice(idx, 1);
+        }
+      } else {
+        addItem(win.selectedItem.name, win.selectedItem.count);
+        win.selectedItem = null;
+      }
+      return;
+    }
+
+    if (slot >= 1 && slot <= gridEnd && mode === 0 && mouseButton === 1 && win.selectedItem) {
+      if (!win.grid[slot - 1]) {
+        win.grid[slot - 1] = { type: win.selectedItem.type, name: win.selectedItem.name, count: 1 };
+      } else {
+        win.grid[slot - 1].count += 1;
+      }
+      win.selectedItem.count -= 1;
+      if (win.selectedItem.count <= 0) win.selectedItem = null;
+    }
+  };
+
+  // Live Furnace & GTL 1-Tick Blast Furnace
+  bot.openFurnace = async () => {
+    let fuelSlot = null;
+    let outSlot = null;
+    return {
+      fuelItem: () => fuelSlot,
+      inputItem: () => null,
+      outputItem: () => outSlot,
+      putFuel: async (typeId, _meta, count) => {
+        removeItemByType(typeId, count);
+        fuelSlot = { type: typeId, count };
+      },
+      putInput: async (typeId, _meta, count) => {
+        const src = invStacks.find((s) => s.type === typeId);
+        const srcName = src ? src.name : '';
+        removeItemByType(typeId, count);
+
+        let outCanonical = null;
+        if (srcName === 'raw_iron' || srcName.includes('magnetite')) outCanonical = 'minecraft:iron_ingot';
+        else if (srcName === 'cobblestone') outCanonical = 'minecraft:stone';
+        else if (srcName === 'stone') outCanonical = 'minecraft:smooth_stone';
+        else if (srcName === 'raw_copper' || srcName.includes('chalcopyrite')) outCanonical = 'minecraft:copper_ingot';
+        else if (srcName.includes('cassiterite') || srcName === 'gtceu:raw_tin') outCanonical = 'gtceu:tin_ingot';
+        else if (srcName === 'gtceu:bronze_dust') outCanonical = 'gtceu:bronze_ingot';
+        else if (srcName === 'clay_ball') outCanonical = 'minecraft:brick';
+
+        if (outCanonical) {
+          const entry = resolveItemEntry(outCanonical);
+          outSlot = { type: entry.id, name: entry.name, count };
+        }
+      },
+      takeOutput: async () => {
+        if (outSlot) {
+          addItem(outSlot.name, outSlot.count);
+          outSlot = null;
+        }
+      },
+      takeInput: async () => {},
+      close: () => {}
+    };
+  };
+
+  return {
+    bot,
+    voxels,
+    invStacks,
+    addItem,
+    deprecationWarnings,
+    bindRegistryBridge: (rb) => {
+      registryBridgeRef = rb;
+    }
+  };
+}
+
+test('installPhysicTickDeprecationShim silences Mineflayer physics.js physicTick warning while preserving tick updates', () => {
+  const { bot, deprecationWarnings } = createInteractiveSurvivalWorldHarness();
+  installPhysicTickDeprecationShim(bot);
+
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: false
+  });
+  agent.attachBot(bot, { startStateMachineImmediately: true });
+
+  assert.equal(
+    deprecationWarnings.length,
+    0,
+    'Expected ZERO physicTick deprecation warnings when BotStateMachine subscribes'
+  );
+  agent.shutdown();
+});
+
+test('AutonomousProgressionEngine self-care eats food when hungry and evades nearby Creepers', async () => {
+  const { bot, addItem, bindRegistryBridge } = createInteractiveSurvivalWorldHarness();
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: false
+  });
+  bindRegistryBridge(agent.registryBridge);
+  agent.attachBot(bot, {
+    progressionOptions: { persistState: false, actionDelayScale: 0 }
+  });
+
+  // 1. Hunger self-care
+  bot.food = 10;
+  addItem('minecraft:bread', 2);
+  const resEat = await agent.progressionEngine.runSingleCycle();
+  assert.equal(resEat.stage, 'SELF_CARE');
+  assert.equal(bot.food, 18);
+
+  // 2. Creeper blast evasion
+  bot.entities[99] = {
+    id: 99,
+    name: 'creeper',
+    position: new Vec3(2.5, 64, 0.5),
+    height: 1.7
+  };
+  const startPos = bot.entity.position.clone();
+  const resCreeper = await agent.progressionEngine.runSingleCycle();
+  assert.equal(resCreeper.stage, 'SELF_CARE');
+  assert.ok(
+    bot.entity.position.distanceTo(startPos) > 4,
+    'Bot should sprint away from nearby Creeper'
+  );
+
+  agent.shutdown();
+});
+
+test('AutonomousProgressionEngine plays from empty-handed spawn through Wood -> Base -> 1-Tick Blast Furnace -> GTCEu Tools -> Modded Vein Prospecting -> Bronze & Steam -> PBF -> MV/HV Quest Frontier', async () => {
+  const { bot, addItem, bindRegistryBridge, deprecationWarnings } =
+    createInteractiveSurvivalWorldHarness();
+
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: false
+  });
+
+  // Load synced GregTech Leisure 1.20.1 modded item/block IDs
+  agent.registryBridge.loadDump([
+    { kind: 'item', name: 'gtceu:iron_hammer', id: 14001 },
+    { kind: 'item', name: 'gtceu:iron_mortar', id: 14002 },
+    { kind: 'item', name: 'gtceu:iron_plate', id: 14003 },
+    { kind: 'item', name: 'gtceu:iron_wrench', id: 14004 },
+    { kind: 'item', name: 'gtceu:iron_file', id: 14005 },
+    { kind: 'item', name: 'gtceu:raw_chalcopyrite', id: 14006 },
+    { kind: 'item', name: 'gtceu:raw_cassiterite', id: 14007 },
+    { kind: 'item', name: 'gtceu:tin_ingot', id: 14008 },
+    { kind: 'item', name: 'gtceu:copper_dust', id: 14009 },
+    { kind: 'item', name: 'gtceu:tin_dust', id: 14010 },
+    { kind: 'item', name: 'gtceu:bronze_dust', id: 14011 },
+    { kind: 'item', name: 'gtceu:bronze_ingot', id: 14012 },
+    { kind: 'item', name: 'gtceu:bronze_plate', id: 14013 },
+    { kind: 'item', name: 'gtceu:lp_steam_solid_boiler', id: 14014 },
+    { kind: 'item', name: 'gtceu:firebricks', id: 14015 },
+    { kind: 'item', name: 'gtceu:primitive_blast_furnace', id: 14016 },
+    { kind: 'item', name: 'kubejs:advanced_control_circuit', id: 14017 },
+    { kind: 'item', name: 'gtceu:aluminium_ingot', id: 14018 },
+    { kind: 'item', name: 'gtceu:stainless_steel_ingot', id: 14019 },
+    { kind: 'block', name: 'gtceu:lp_steam_solid_boiler', id: 3201 },
+    { kind: 'block', name: 'gtceu:firebricks', id: 3202 },
+    { kind: 'block', name: 'gtceu:primitive_blast_furnace', id: 3203 }
+  ]);
+  bindRegistryBridge(agent.registryBridge);
+
+  const completedMilestones = [];
+  agent.on('milestoneCompleted', (id) => completedMilestones.push(id));
+
+  agent.attachBot(bot, {
+    progressionOptions: { persistState: false, stepIntervalMs: 10, actionDelayScale: 0 }
+  });
+  assert.equal(deprecationWarnings.length, 0);
+
+  const engine = agent.progressionEngine;
+  assert.ok(engine instanceof AutonomousProgressionEngine);
+  assert.equal(engine.getInventoryItems().length, 0, 'Starts completely empty-handed');
+
+  // Run autonomous cycles continuously — no commands issued!
+  for (let cycle = 0; cycle < 65; cycle++) {
+    await engine.runSingleCycle();
+    if (completedMilestones.includes('M09_PRIMITIVE_BLAST_FURNACE')) break;
+  }
+
+  // Verify real survival progression milestones completed autonomously:
+  assert.ok(completedMilestones.includes('M01_WOOD_BOOTSTRAP'), 'Completed wood bootstrap');
+  assert.ok(completedMilestones.includes('M02_BASE_AND_CRAFTING_TABLE'), 'Placed Crafting Table & pickaxe');
+  assert.ok(completedMilestones.includes('M03_STONE_TOOLS_AND_FURNACE'), 'Placed Furnace & Warehouse Chest');
+  assert.ok(completedMilestones.includes('M04_PROSPECT_COAL_AND_IRON'), 'Mined & smelted Iron');
+  assert.ok(completedMilestones.includes('M05_FAST_BLAST_FURNACE_AND_IRON_KIT'), 'Placed GTL 1-Tick Blast Furnace');
+  assert.ok(completedMilestones.includes('M06_GTCEU_HAND_TOOLS'), 'Crafted modded GTCEu Iron Hammer & Mortar');
+  assert.ok(completedMilestones.includes('M07_COPPER_TIN_AND_BRONZE'), 'Prospected modded Copper/Tin veins & smelted Bronze');
+  assert.ok(completedMilestones.includes('M08_STEAM_BOILER_AND_MACHINES'), 'Built LP Steam Solid Boiler');
+  assert.ok(completedMilestones.includes('M09_PRIMITIVE_BLAST_FURNACE'), 'Advanced through PBF multiblock stage');
+
+  // Verify dynamic GTCEu modded `stateId > vanillaMaxStateId` learning discovered both modded ore veins!
+  assert.equal(engine.worldState.learnedOreStates['48120'], 'gtceu:raw_chalcopyrite');
+  assert.equal(engine.worldState.learnedOreStates['49310'], 'gtceu:raw_cassiterite');
+
+  // Verify continuous FTB Quests frontier auto-unlocks LV -> MV -> HV voltage tiers as milestone items are produced!
+  addItem('kubejs:advanced_control_circuit', 2);
+  addItem('gtceu:aluminium_ingot', 1);
+  addItem('gtceu:stainless_steel_ingot', 1);
+  await engine.runSingleCycle();
+
+  assert.equal(agent.craftingEngine.unlockedVoltageTier, 'HV');
+
+  agent.shutdown();
+});

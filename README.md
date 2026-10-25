@@ -78,6 +78,8 @@ Gtnh-bot-v1/
 │   ├── bot.js                                 # Native Mineflayer 1.20.1 entry point & GTLAutomationAgent
 │   ├── craftingEngine.js                      # FTB Quests/JEI DAG solver, WarehouseTracker & 1.20.1 GUI clicker
 │   ├── multiblockBuilder.js                   # 3D schematic printer, 1.20.1 block_place & duct-tape servicing
+│   ├── survival/
+│   │   └── autonomousProgression.js           # Zero-command survival bootstrap, GTCEu vein prospector & quest runner
 │   ├── protocol/
 │   │   └── forgeHandshake.js                  # Forge 47.x FML3 (\0FML3\0, fml:loginwrapper / fml:handshake)
 │   ├── navigation/
@@ -91,10 +93,16 @@ Gtnh-bot-v1/
 │       ├── ingestData.js                      # FTB Quests .snbt parser + JEI/KubeJS DAG ingestion CLI
 │       ├── planCraft.js                       # Offline GTCEu/KubeJS DAG crafting plan inspector
 │       └── validateBlueprint.js               # 3D multiblock rotation & BOM verifier
-└── test/                                      # 16 automated integration & unit tests (`npm test`)
+└── test/                                      # 21 automated survival, live-TCP & unit tests (`npm test`)
 ```
 
 ### Core Capabilities Trained on GregTech Leisure
+
+0. **Zero-Command Autonomous Survival & Modpack Progression (`src/survival/autonomousProgression.js`)**:
+   - **No chat commands needed**: the moment the bot spawns into a survival world, it immediately begins playing toward one unified goal — **progressing through and beating GregTech Leisure from scratch**.
+   - **Full Survival Self-Care**: Automatically eats food when hungry, cooks raw meat, hunts passive animals if starving, sprints clear of Creepers before detonation, defends against Zombies/Skeletons, recovers seamlessly across death/respawn, and persists Base Camp coordinates + discovered ore veins in `.gtl-runtime-state.json`.
+   - **Dynamic GTCEu 3x3-Chunk Ore Vein Prospector**: Scans loaded chunks (`y = -44..112`) for modded blockState clusters (`stateId > vanillaMaxStateId` embedded in stone/deepslate), digs a sample block, learns `stateId -> synced GTCEu raw ore itemId` (`gtceu:raw_chalcopyrite`, `gtceu:raw_cassiterite`, `gtceu:raw_magnetite`, etc.) from inventory deltas, and mines full batches safely away from lava.
+   - **GTL-Specific Early-Game Acceleration & Live Modded Crafting**: Respects `harderCharcoalRecipe: true` (converts `1 log -> 4 planks` for 4x starter smelting fuel), rushes GTL's **1-tick `minecraft:blast_furnace`** (`开荒加速`), crafts modded GTCEu hand tools (`hammer`, `mortar`, `wrench`, `file`) via server-authoritative `3x3` Crafting Table `ResultSlot` clicks (reclaiming durable GTCEu tools left in grid slots `1..9`), builds `gtceu:lp_steam_solid_boiler` + 3D `primitive_blast_furnace`, and advances continuously through `STEAM -> LV -> MV -> HV+` FTB Quests.
 
 1. **Zero-Proxy Forge `1.20.1` (`FML3`) Handshake (`src/protocol/forgeHandshake.js`)**:
    - Injects the `\0FML3\0` hostname marker on `set_protocol`, unwraps `fml:loginwrapper` (`fml:handshake` packets `1` `S2CModList`, `2` `C2SModListReply`, `3` `S2CRegistry`, `4` `S2CConfigData`, `99` `C2SAck`), mirrors server mod channels automatically, and maps flattened 1.20.1 ResourceLocation IDs (`gtceu:*`, `gtlcore:*`, `kubejs:*`).

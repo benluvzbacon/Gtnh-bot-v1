@@ -8,6 +8,69 @@ const {
 } = require('mineflayer-statemachine');
 
 /**
+ * Maps raw item IDs (`minecraft:raw_iron`, `gtceu:raw_tin`, `gtceu:sticky_resin`, etc.)
+ * to harvestable world block IDs in `bot.registry.blocksByName`.
+ */
+function resolveWorldBlockIdsForRawItem(bot, itemId) {
+  if (!bot?.registry?.blocksByName) return [];
+  const clean = String(itemId || '').toLowerCase();
+  const shortName = clean.split(':')[1] || clean;
+  const candidateNames = new Set([shortName]);
+
+  if (shortName === 'raw_iron') {
+    candidateNames.add('iron_ore');
+    candidateNames.add('deepslate_iron_ore');
+  } else if (shortName === 'raw_copper') {
+    candidateNames.add('copper_ore');
+    candidateNames.add('deepslate_copper_ore');
+  } else if (shortName === 'raw_gold') {
+    candidateNames.add('gold_ore');
+    candidateNames.add('deepslate_gold_ore');
+  } else if (shortName === 'coal' || shortName === 'raw_coal') {
+    candidateNames.add('coal_ore');
+    candidateNames.add('deepslate_coal_ore');
+  } else if (shortName === 'redstone' || shortName === 'raw_redstone') {
+    candidateNames.add('redstone_ore');
+    candidateNames.add('deepslate_redstone_ore');
+  } else if (shortName === 'clay_ball') {
+    candidateNames.add('clay');
+  } else if (shortName === 'cobblestone') {
+    candidateNames.add('stone');
+    candidateNames.add('cobblestone');
+  } else if (shortName === 'sticky_resin') {
+    candidateNames.add('gtceu:rubber_log');
+    candidateNames.add('rubber_log');
+  }
+
+  const ids = [];
+  for (const name of candidateNames) {
+    const blk = bot.registry.blocksByName[name];
+    if (blk && typeof blk.id === 'number') {
+      ids.push(blk.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Remaps `mineflayer-statemachine`'s legacy `'physicTick'` event subscription to
+ * modern `'physicsTick'` BEFORE `new BotStateMachine(bot, root)` runs, completely
+ * preventing Mineflayer `physics.js`'s `newListener` deprecation warning!
+ */
+function installPhysicTickDeprecationShim(bot) {
+  if (!bot || bot._gtlPhysicTickShimmed) return;
+  const remapEvent = (event) => (event === 'physicTick' ? 'physicsTick' : event);
+
+  for (const method of ['on', 'addListener', 'once', 'removeListener', 'off']) {
+    if (typeof bot[method] === 'function') {
+      const orig = bot[method].bind(bot);
+      bot[method] = (event, ...rest) => orig(remapEvent(event), ...rest);
+    }
+  }
+  bot._gtlPhysicTickShimmed = true;
+}
+
+/**
  * Helper base class implementing `mineflayer-statemachine`'s `StateBehavior` contract
  * with async-safe tick execution guards so async Mineflayer tasks never overlap across ticks.
  */
@@ -122,10 +185,12 @@ function buildGTNHStateMachine({
     onEnter: async (self) => {
       const raw = locateOreState.targetRaw;
       if (raw && bot?.findBlock && navigator) {
-        const shortName = raw.itemId.split(':')[1] || '';
-        const blkType = bot.registry?.blocksByName?.[shortName]?.id;
-        if (blkType !== undefined) {
-          const found = bot.findBlock({ matching: blkType, maxDistance: 48 });
+        const blkIds = resolveWorldBlockIdsForRawItem(bot, raw.itemId);
+        if (blkIds.length > 0) {
+          const found = bot.findBlock({
+            matching: blkIds.length === 1 ? blkIds[0] : blkIds,
+            maxDistance: 48
+          });
           if (found) {
             self.targetBlock = found;
             await navigator.gotoBlockAdjacent(found.position, 15000);
@@ -628,9 +693,12 @@ function buildGTNHStateMachine({
   );
   rootMachine.stateName = 'RootGTLStateMachine';
 
+  // Install 'physicTick' -> 'physicsTick' shim BEFORE BotStateMachine subscribes so
+  // Mineflayer's physics.js `newListener` hook never logs a deprecation warning!
+  installPhysicTickDeprecationShim(bot);
   const botStateMachine = new BotStateMachine(bot, rootMachine);
 
-  // Deduplicate legacy 'physicTick' and modern 'physicsTick'
+  // Deduplicate ticks within a single event-loop turn
   let updatedThisTurn = false;
   const origUpdate = botStateMachine.update.bind(botStateMachine);
   botStateMachine.update = () => {
@@ -641,9 +709,6 @@ function buildGTNHStateMachine({
     });
     origUpdate();
   };
-  if (typeof bot?.on === 'function') {
-    bot.on('physicsTick', () => botStateMachine.update());
-  }
 
   return {
     botStateMachine,
@@ -664,6 +729,8 @@ function buildGTNHStateMachine({
 module.exports = {
   GTNHBehaviorState,
   GTLBehaviorState: GTNHBehaviorState,
+  installPhysicTickDeprecationShim,
+  resolveWorldBlockIdsForRawItem,
   buildGTNHStateMachine,
   buildGTLStateMachine: buildGTNHStateMachine
 };

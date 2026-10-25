@@ -24,7 +24,11 @@ const {
 } = require('./craftingEngine');
 const { MultiblockBuilder } = require('./multiblockBuilder');
 const { HazardMonitor } = require('./hazards/hazardMonitor');
-const { buildGTLStateMachine } = require('./statemachine/hierarchy');
+const {
+  buildGTLStateMachine,
+  installPhysicTickDeprecationShim
+} = require('./statemachine/hierarchy');
+const { AutonomousProgressionEngine } = require('./survival/autonomousProgression');
 
 /**
  * Parses optional CLI flags (`--host`, `--port`, `--username`, `--auth`, `--version`, `--fml2`)
@@ -117,6 +121,9 @@ function resolveAgentConfig(overrides = {}) {
     autoReconnect:
       overrides.autoReconnect ??
       (process.env.GTL_AUTO_RECONNECT !== '0' && process.env.GTNH_AUTO_RECONNECT !== '0'),
+    enableAutonomousSurvival:
+      overrides.enableAutonomousSurvival ??
+      process.env.GTL_AUTONOMOUS !== '0',
     reconnectBaseDelayMs: Number(overrides.reconnectBaseDelayMs || 5000),
     debugWindows: overrides.debugWindows ?? (process.env.BOT_DEBUG_WINDOWS === '1')
   };
@@ -154,6 +161,7 @@ class GTLAutomationAgent extends EventEmitter {
     this.navigator = null;
     this.multiblockBuilder = null;
     this.hazardMonitor = null;
+    this.progressionEngine = null;
     this.stateMachineBundle = null;
     this.fmlSession = null;
 
@@ -245,6 +253,7 @@ class GTLAutomationAgent extends EventEmitter {
 
   attachBot(bot, options = {}) {
     this.bot = bot;
+    installPhysicTickDeprecationShim(bot);
     const fmlMarker = options.fmlMarker || this._activeFmlMarker || '\0FML3\0';
 
     if (!this.fmlSession && bot._client && this.config.forgeBridgeMode !== 'vanilla') {
@@ -311,6 +320,21 @@ class GTLAutomationAgent extends EventEmitter {
       ...(options.hazardOptions || {})
     });
 
+    if (this.progressionEngine) {
+      this.progressionEngine.stop();
+    }
+    this.progressionEngine = new AutonomousProgressionEngine({
+      bot,
+      navigator: this.navigator,
+      craftingEngine: this.craftingEngine,
+      multiblockBuilder: this.multiblockBuilder,
+      hazardMonitor: this.hazardMonitor,
+      registryBridge: this.registryBridge,
+      options: options.progressionOptions || {}
+    });
+    this.progressionEngine.on('log', (entry) => this.emit('log', entry));
+    this.progressionEngine.on('milestoneCompleted', (id) => this.emit('milestoneCompleted', id));
+
     this._bindWorldAndTelemetryListeners(bot);
 
     if (options.startStateMachineImmediately) {
@@ -327,6 +351,12 @@ class GTLAutomationAgent extends EventEmitter {
           message: `[Forge1201] Spawned in GregTech Leisure world${pos ? ` at (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})` : ''}!`
         });
         this._initStateMachine(options.stateMachineOptions);
+        if (
+          options.enableAutonomousSurvival !== false &&
+          this.config.enableAutonomousSurvival !== false
+        ) {
+          this.progressionEngine.start();
+        }
         this.emit('ready', { position: pos });
       });
     }
@@ -443,6 +473,9 @@ class GTLAutomationAgent extends EventEmitter {
 
       bot.on('end', (reason) => {
         this.emit('log', { level: 'warn', message: `[Forge1201] Disconnected (${reason || 'end'})` });
+        if (this.progressionEngine) {
+          this.progressionEngine.stop();
+        }
         this.stateMachineBundle = null;
         if (!this._shuttingDown && this.config.autoReconnect) {
           this._scheduleReconnect();
@@ -476,6 +509,9 @@ class GTLAutomationAgent extends EventEmitter {
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
+    }
+    if (this.progressionEngine) {
+      this.progressionEngine.stop();
     }
     if (this.navigator) {
       this.navigator.stop();
