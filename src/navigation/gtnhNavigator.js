@@ -289,9 +289,9 @@ class GTNHNavigator extends EventEmitter {
     moves.infiniteLiquidDropdownDistance = true;
     moves.dontCreateFlow = true;
     moves.dontMineUnderFallingBlock = true;
-    moves.allow1by1towers = false;
+    moves.allow1by1towers = this.options.allow1by1towers !== false;
     moves.allowSprinting = this.options.allowSprinting !== false;
-    moves.allowParkour = this.options.allowParkour !== false;
+    moves.allowParkour = Boolean(this.options.allowParkour ?? false);
     moves.canDig = Boolean(this.options.canDigInWild);
     moves.digCost = this.options.digCost ?? 1.2;
     moves.liquidCost = this.options.liquidCost ?? 2.5;
@@ -340,8 +340,27 @@ class GTNHNavigator extends EventEmitter {
       }
     }
 
-    // Allow dirt/cobblestone scaffolding so survival mining & hill climbs never get trapped in 2-block pits
-    for (const scafName of ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack']) {
+    // Allow dirt, cobblestone, stone variants, and planks as scaffolding so survival mining &
+    // hill climbs never get trapped inside 2-block pits or underground quarries!
+    for (const scafName of [
+      'dirt',
+      'coarse_dirt',
+      'cobblestone',
+      'cobbled_deepslate',
+      'andesite',
+      'diorite',
+      'granite',
+      'tuff',
+      'netherrack',
+      'oak_planks',
+      'spruce_planks',
+      'birch_planks',
+      'jungle_planks',
+      'acacia_planks',
+      'dark_oak_planks',
+      'mangrove_planks',
+      'cherry_planks'
+    ]) {
       const itemEntry = this.bot.registry.itemsByName?.[scafName];
       if (itemEntry && !moves.scafoldingBlocks.includes(itemEntry.id)) {
         moves.scafoldingBlocks.push(itemEntry.id);
@@ -502,6 +521,16 @@ class GTNHNavigator extends EventEmitter {
     return penalty;
   }
 
+  _botHasPickaxeInInventory() {
+    const items =
+      typeof this.bot?.inventory?.items === 'function' ? this.bot.inventory.items() : [];
+    for (const item of items) {
+      const n = String(item?.name || '').toLowerCase();
+      if (n.includes('pickaxe')) return true;
+    }
+    return false;
+  }
+
   evaluateBreakPenalty(block) {
     if (!block || !block.position) return 0;
     const pos = block.position;
@@ -510,6 +539,26 @@ class GTNHNavigator extends EventEmitter {
       if (isInsideAABB(pos, struct.min, struct.max)) {
         return 1000;
       }
+    }
+
+    const bName = String(block.name || '').toLowerCase().replace(/^minecraft:/, '');
+    const needsPickaxe =
+      bName === 'stone' ||
+      bName === 'cobblestone' ||
+      bName === 'deepslate' ||
+      bName === 'cobbled_deepslate' ||
+      bName === 'granite' ||
+      bName === 'diorite' ||
+      bName === 'andesite' ||
+      bName === 'tuff' ||
+      bName === 'calcite' ||
+      bName === 'dripstone_block' ||
+      bName === 'blackstone' ||
+      bName === 'basalt' ||
+      bName.endsWith('_ore');
+
+    if (needsPickaxe && !this._botHasPickaxeInInventory()) {
+      return 1000;
     }
 
     if (this.hasAdjacentLava(pos)) {

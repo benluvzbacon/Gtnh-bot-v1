@@ -77,7 +77,7 @@ function installPhysicTickDeprecationShim(bot) {
  * within `slot0TimeoutMs` whenever a Minecraft `1.20.1` server omits `set_slot(0)` on `null -> null`
  * transitions, completely eliminating `Event updateSlot:0 did not fire within timeout of 20000ms`!
  */
-function guardWindowSlot0Listeners(window, slot0TimeoutMs = 85) {
+function guardWindowSlot0Listeners(window, slot0TimeoutMs = 140) {
   if (!window || window._gtlSlot0Guarded || typeof window.emit !== 'function') return;
   const origOnce = typeof window.once === 'function' ? window.once.bind(window) : null;
   let inInternal = false;
@@ -104,6 +104,11 @@ function guardWindowSlot0Listeners(window, slot0TimeoutMs = 85) {
       }
     }
 
+    // If `slot 0` already held an item before the click (e.g. button -> plate -> slab -> pickaxe,
+    // or taking the crafted result!), the 1.20.1 server WILL send `set_slot(0)` with the updated
+    // `stateId` — allow up to 3x `slot0TimeoutMs` on low-end PCs so we never race ahead with a stale `stateId`!
+    const effectiveWaitMs = window.slots?.[0] ? slot0TimeoutMs * 3 : slot0TimeoutMs;
+
     timer = setTimeout(() => {
       timer = null;
       if (settled) return;
@@ -117,7 +122,7 @@ function guardWindowSlot0Listeners(window, slot0TimeoutMs = 85) {
         const cur0 = window.slots?.[0] ?? null;
         window.emit('updateSlot:0', cur0, cur0);
       }
-    }, slot0TimeoutMs);
+    }, effectiveWaitMs);
   };
 
   for (const method of ['addListener', 'on']) {
@@ -145,7 +150,7 @@ function guardWindowSlot0Listeners(window, slot0TimeoutMs = 85) {
  */
 function installFastWindowClickShim(bot, options = {}) {
   if (!bot) return;
-  const slot0TimeoutMs = options.slot0TimeoutMs ?? 80;
+  const slot0TimeoutMs = options.slot0TimeoutMs ?? 140;
 
   const applyWindowAndMethodHooks = () => {
     if (bot.inventory) {

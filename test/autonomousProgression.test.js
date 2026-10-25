@@ -1132,4 +1132,454 @@ test('guardWindowSlot0Listeners unblocks real Mineflayer promise_utils.once(wind
   agent.shutdown();
 });
 
+test('Bot never mines stone without a pickaxe in hand (M02 gate, hill station placement, hotbar slot 44, pathfinder dirt-swap recovery, and navigator stone penalty)', async () => {
+  const { GTNHNavigator } = require('../src/navigation/gtnhNavigator');
+
+  const bot = new EventEmitter();
+  bot.version = '1.20.1';
+  bot.QUICK_BAR_START = 36;
+  bot.quickBarSlot = null; // Reproduces fresh spawn before any setQuickBarSlot!
+  bot.heldItem = null;
+  bot.health = 20;
+  bot.food = 20;
+  bot.oxygenLevel = 20;
+  bot.entities = {};
+  bot.entity = {
+    position: new Vec3(0.5, 64, 0.5),
+    velocity: new Vec3(0, 0, 0),
+    isInWater: false,
+    onGround: true
+  };
+
+  const slots = new Array(46).fill(null);
+  const syncHeld = () => {
+    bot.heldItem = typeof bot.quickBarSlot === 'number' ? slots[36 + bot.quickBarSlot] || null : null;
+  };
+  bot.setQuickBarSlot = (slotIdx) => {
+    bot.quickBarSlot = slotIdx;
+    syncHeld();
+  };
+  bot.inventory = {
+    inventoryStart: 9,
+    inventoryEnd: 45,
+    slots,
+    items: () => slots.slice(9, 45).filter(Boolean)
+  };
+  bot.equip = async (item, dest) => {
+    if (dest === 'hand') {
+      if (item.slot >= 36 && item.slot <= 44) {
+        bot.setQuickBarSlot(item.slot - 36);
+      } else {
+        const prev = slots[36];
+        slots[36] = { ...item, slot: 36 };
+        slots[item.slot] = prev ? { ...prev, slot: item.slot } : null;
+        bot.setQuickBarSlot(0);
+      }
+    }
+  };
+
+  // Simulate `mineflayer-tool` unequipping hand on digTime ties (the exact bug in mineflayer-tool!)
+  bot.tool = {
+    equipForBlock: async () => {
+      slots[36 + (bot.quickBarSlot ?? 0)] = slots[36 + (bot.quickBarSlot ?? 0)];
+      bot.heldItem = null;
+    }
+  };
+
+  // World map with a 1-block dirt hill at (2, 64, 0) where Crafting Table prefers to go,
+  // and exposed `stone` blocks at (8..10, 64, 0)
+  const worldBlocks = new Map();
+  const keyOf = (x, y, z) => `${x},${y},${z}`;
+  for (let x = -12; x <= 14; x++) {
+    for (let z = -12; z <= 14; z++) {
+      worldBlocks.set(keyOf(x, 63, z), {
+        name: 'grass_block',
+        type: 2,
+        stateId: 9,
+        boundingBox: 'block',
+        position: new Vec3(x, 63, z)
+      });
+    }
+  }
+  // 1-block dirt bump right at (2, 64, 0)
+  worldBlocks.set(keyOf(2, 64, 0), {
+    name: 'dirt',
+    type: 3,
+    stateId: 10,
+    boundingBox: 'block',
+    position: new Vec3(2, 64, 0)
+  });
+  for (let sx = 8; sx <= 10; sx++) {
+    worldBlocks.set(keyOf(sx, 64, 0), {
+      name: 'stone',
+      type: 1,
+      stateId: 1,
+      boundingBox: 'block',
+      position: new Vec3(sx, 64, 0)
+    });
+  }
+
+  bot.registry = require('prismarine-registry')('1.20.1');
+  const stoneId = bot.registry.blocksByName.stone.id;
+  const grassId = bot.registry.blocksByName.grass_block.id;
+  const dirtId = bot.registry.blocksByName.dirt.id;
+  const tableId = bot.registry.blocksByName.crafting_table.id;
+  const woodPickId = bot.registry.itemsByName.wooden_pickaxe.id;
+  const cobbleId = bot.registry.itemsByName.cobblestone.id;
+  for (const blk of worldBlocks.values()) {
+    if (blk.name === 'stone') blk.type = stoneId;
+    if (blk.name === 'grass_block') blk.type = grassId;
+    if (blk.name === 'dirt') blk.type = dirtId;
+  }
+
+  bot.blockAt = (pos) => {
+    const p = pos.floored();
+    return (
+      worldBlocks.get(keyOf(p.x, p.y, p.z)) || {
+        name: 'air',
+        type: 0,
+        stateId: 0,
+        boundingBox: 'empty',
+        position: p
+      }
+    );
+  };
+  bot.findBlocks = ({ matching }) => {
+    const ids = Array.isArray(matching) ? matching : [matching];
+    const out = [];
+    for (const blk of worldBlocks.values()) {
+      if (ids.includes(blk.type)) out.push(blk.position.clone());
+    }
+    return out;
+  };
+
+  let allowWorldPlace = false;
+  bot.placeBlock = async (refBlock, faceVec) => {
+    if (!allowWorldPlace || !bot.heldItem) return;
+    const dest = refBlock.position.plus(faceVec).floored();
+    worldBlocks.set(keyOf(dest.x, dest.y, dest.z), {
+      name: bot.heldItem.name,
+      type: bot.heldItem.type,
+      stateId: 58,
+      boundingBox: 'block',
+      position: dest
+    });
+    const s = bot.heldItem.slot;
+    slots[s] = null;
+    syncHeld();
+  };
+
+  const stoneDigTools = [];
+  bot.dig = async (blk) => {
+    if (blk.name === 'stone') {
+      stoneDigTools.push(bot.heldItem ? bot.heldItem.name : 'EMPTY_HAND');
+      worldBlocks.delete(keyOf(blk.position.x, blk.position.y, blk.position.z));
+      // Deposit cobblestone into slot 12
+      slots[12] = {
+        type: cobbleId,
+        name: 'cobblestone',
+        count: (slots[12]?.count || 0) + 1,
+        slot: 12
+      };
+    }
+  };
+
+  // Simulate `mineflayer-pathfinder` equipping `dirt` (slot 37) during `goto`!
+  bot.pathfinder = {
+    thinkTimeout: 5000,
+    setMovements() {},
+    setGoal() {},
+    stop() {},
+    isMoving: () => false,
+    goto: async (goal) => {
+      if (typeof goal?.x === 'number' && typeof goal?.z === 'number') {
+        bot.entity.position = new Vec3(goal.x - 1, goal.y ?? 64, goal.z);
+      }
+      if (slots[37]?.name === 'dirt') {
+        bot.setQuickBarSlot(1); // pathfinder leaves dirt in hand!
+      }
+    }
+  };
+  const nav = new GTNHNavigator(bot);
+
+  const engine = new AutonomousProgressionEngine({
+    bot,
+    navigator: nav,
+    options: {
+      persistState: false,
+      actionDelayScale: 0
+    }
+  });
+  engine.markMilestoneComplete('M01_WOOD_BOOTSTRAP');
+
+  // 1. Without a pickaxe, GTNHNavigator forbids pathfinder from tunneling through stone (`penalty = 1000`),
+  //    AND `digAndCollectBlock(stone)` refuses to swing bare-handed!
+  const stoneAt8 = bot.blockAt(new Vec3(8, 64, 0));
+  assert.equal(nav.evaluateBreakPenalty(stoneAt8), 1000, 'Navigator must forbid breaking stone without a pickaxe');
+  const bareDig = await engine.digAndCollectBlock(stoneAt8);
+  assert.equal(bareDig, false, 'digAndCollectBlock must refuse to punch stone bare-handed');
+  assert.equal(stoneDigTools.length, 0, 'Zero bare-handed stone dig attempts allowed');
+  bot.entity.position = new Vec3(0.5, 64, 0.5);
+
+  // 2. When Crafting Table placement fails on server (`allowWorldPlace = false`), `placeStationAtBase`
+  //    must NOT save fake station coords AND `runSingleCycle()` must stay in `M02_BASE_AND_CRAFTING_TABLE`!
+  slots[36] = { type: tableId, name: 'crafting_table', count: 1, slot: 36 };
+  slots[37] = { type: dirtId, name: 'dirt', count: 16, slot: 37 };
+  const cycleFailPlace = await engine.runSingleCycle();
+  assert.equal(cycleFailPlace.stage, 'M02_BASE_AND_CRAFTING_TABLE');
+  assert.equal(engine.worldState.stations.craftingTable, null, 'Unverified placement must not save station coords');
+  assert.equal(stoneDigTools.length, 0, 'M02 must never fall through to M03 stone mining without a pickaxe');
+
+  // 3. Now allow world placement: `placeStationAtBase` adapts to the 1-block dirt hill `(2, 65, 0)`!
+  allowWorldPlace = true;
+  const placedTable = await engine.placeStationAtBase('minecraft:crafting_table', 'craftingTable', {
+    x: 2,
+    y: 0,
+    z: 0
+  });
+  assert.ok(placedTable, 'placeStationAtBase should adapt to 1-block slope at (2, 65, 0)');
+  assert.deepEqual(engine.worldState.stations.craftingTable, { x: 2, y: 65, z: 0 });
+
+  // 4. Deposit crafted `wooden_pickaxe` into hotbar `slot 44` (where shift-clicking slot 0 places it!)
+  //    while `quickBarSlot` is currently holding `dirt` (`slot 37`), then mine stone!
+  slots[44] = { type: woodPickId, name: 'wooden_pickaxe', count: 1, slot: 44 };
+  assert.equal(nav.evaluateBreakPenalty(stoneAt8), 0, 'Navigator allows stone break once pickaxe is in inventory');
+
+  await engine.gatherSurfaceBlocks(['stone'], '#cobblestone', 3);
+  assert.equal(stoneDigTools.length, 3, 'Should mine all 3 stone blocks');
+  for (const usedTool of stoneDigTools) {
+    assert.equal(
+      usedTool,
+      'wooden_pickaxe',
+      'Every single stone block MUST be mined with wooden_pickaxe in hand even after pathfinder swapped to dirt!'
+    );
+  }
+  assert.equal(bot.quickBarSlot, 8, 'Hotbar slot 8 (window slot 44) should be selected');
+  assert.equal(bot.heldItem?.name, 'wooden_pickaxe');
+});
+
+test('UniversalRecipeRegistry & AutonomousProgressionEngine: raw_coal->coal smelting, furnace-only smooth_stone routing, declare_recipes sync, heartbeat watchdog, and pit self-unstick', async () => {
+  const { UniversalRecipeRegistry } = require('../src/recipes/universalRecipeRegistry');
+  const { ForgeRegistryBridge } = require('../src/protocol/forgeHandshake');
+
+  const bridge = new ForgeRegistryBridge();
+  bridge.numericIdToName = new Map([
+    [9101, 'gtceu:raw_coal'],
+    [9102, 'minecraft:coal'],
+    [9103, 'minecraft:oak_planks'],
+    [9104, 'minecraft:cobblestone'],
+    [9105, 'minecraft:stone'],
+    [9106, 'minecraft:smooth_stone'],
+    [9107, 'minecraft:dirt'],
+    [9108, 'kubejs:custom_ingot']
+  ]);
+
+  const reg = new UniversalRecipeRegistry({ registryBridge: bridge });
+
+  // 1. Verify UniversalRecipeRegistry coverage (750+ Vanilla + GTCEu + GTL recipes + fuel rules)
+  assert.ok(reg.craftingByOutput.size >= 700, 'Must index 700+ vanilla & modded crafting outputs');
+  assert.equal(reg.isValidFurnaceFuel('gtceu:raw_coal'), false, 'raw_coal must NEVER be treated as furnace fuel');
+  assert.equal(reg.isValidFurnaceFuel('gtceu:raw_lignite_coal'), false, 'raw_lignite_coal is not direct fuel');
+  assert.equal(reg.getFuelSmeltCapacity('minecraft:coal'), 8);
+  assert.equal(reg.getFuelSmeltCapacity('minecraft:oak_planks'), 1.5);
+  assert.equal(reg.getFuelSmeltCapacity('gtceu:coke_gem'), 16);
+
+  const rawCoalSmelt = reg.getSmeltingRecipeForInput('gtceu:raw_coal', 'blast_furnace');
+  assert.ok(rawCoalSmelt && rawCoalSmelt.outputId === 'minecraft:coal' && rawCoalSmelt.outputCount === 2);
+
+  // Cobblestone & stone MUST NOT route to Blast Furnace (`canBlast === false`)!
+  assert.equal(reg.getSmeltingRecipeForInput('minecraft:cobblestone', 'blast_furnace'), null);
+  assert.equal(reg.getSmeltingRecipeForInput('minecraft:stone', 'blast_furnace'), null);
+  assert.equal(reg.getSmeltingRecipeForInput('minecraft:stone', 'furnace')?.outputId, 'minecraft:smooth_stone');
+
+  // EBF-only materials must NOT pretend to smelt in a normal furnace
+  assert.equal(reg.getSmeltingRecipeForInput('gtceu:raw_aluminium', 'furnace'), null);
+  // Dynamic GTCEu non-blast metals DO smelt
+  assert.equal(reg.getSmeltingRecipeForInput('gtceu:raw_cobalt', 'blast_furnace')?.outputId, 'gtceu:cobalt_ingot');
+
+  // Test live `declare_recipes` wire-buffer ingestion (`minecraft:smelting` followed by modded custom serializer)
+  const writeVarInt = (val) => {
+    const bytes = [];
+    let v = val >>> 0;
+    do {
+      let b = v & 0x7f;
+      v >>>= 7;
+      if (v !== 0) b |= 0x80;
+      bytes.push(b);
+    } while (v !== 0);
+    return Buffer.from(bytes);
+  };
+  const writeStr = (s) => {
+    const b = Buffer.from(s, 'utf8');
+    return Buffer.concat([writeVarInt(b.length), b]);
+  };
+  const writeSlot = (id, count) => Buffer.concat([Buffer.from([1]), writeVarInt(id), Buffer.from([count, 0])]);
+  const floatBuf = Buffer.alloc(4);
+  floatBuf.writeFloatBE(0.7, 0);
+
+  const liveDeclareBuf = Buffer.concat([
+    writeVarInt(2), // 2 recipes: 1 standard smelting + 1 custom modded serializer
+    writeStr('minecraft:smelting'),
+    writeStr('kubejs:smelt_custom_ingot'),
+    writeStr(''), // group
+    writeVarInt(0), // category
+    writeVarInt(1), // 1 ingredient option
+    writeSlot(9104, 1), // input: cobblestone (9104)
+    writeSlot(9108, 2), // output: 2x kubejs:custom_ingot (9108)
+    floatBuf,
+    writeVarInt(120),
+    // Trailing custom modded serializer that has arbitrary custom bytes (must stop cleanly without throwing!)
+    writeStr('gtceu:custom_machine_recipe'),
+    writeStr('gtceu:test_unframed'),
+    Buffer.from([0xde, 0xad, 0xbe, 0xef])
+  ]);
+  const added = reg.ingestDeclareRecipesBuffer(liveDeclareBuf);
+  assert.equal(added, 1, 'Should safely ingest standard recipes and stop cleanly at custom modded serializer');
+  assert.equal(reg.getSmeltingRecipesForOutput('kubejs:custom_ingot')[0]?.outputCount, 2);
+
+  // 2. Verify live `ensureFurnaceFuel` smelts `gtceu:raw_coal -> 2x minecraft:coal` in Blast Furnace,
+  //    NEVER puts `gtceu:raw_coal` into Fuel Slot 1, and `smeltToProduceLive('minecraft:smooth_stone', 3)`
+  //    routes `cobblestone -> stone -> smooth_stone` strictly to `furnace` (NOT `blast_furnace`)!
+  const bot = new EventEmitter();
+  bot.version = '1.20.1';
+  bot.QUICK_BAR_START = 36;
+  bot.quickBarSlot = 0;
+  bot.heldItem = null;
+  bot.health = 20;
+  bot.food = 20;
+  bot.oxygenLevel = 20;
+  bot.entities = {};
+  bot.entity = {
+    position: new Vec3(0.5, 64, 0.5),
+    velocity: new Vec3(0, 0, 0),
+    isInWater: false,
+    onGround: true
+  };
+
+  const invItems = [
+    { type: 9101, name: 'gtceu:raw_coal', count: 3, slot: 10 },
+    { type: 9103, name: 'minecraft:oak_planks', count: 2, slot: 11 },
+    { type: 9104, name: 'minecraft:cobblestone', count: 3, slot: 12 },
+    { type: 9107, name: 'minecraft:dirt', count: 8, slot: 36 }
+  ];
+  bot.setQuickBarSlot = (idx) => {
+    bot.quickBarSlot = idx;
+    bot.heldItem = invItems.find((i) => i.slot === 36 + idx) || null;
+  };
+  bot.setQuickBarSlot(0);
+  bot.inventory = {
+    inventoryStart: 9,
+    inventoryEnd: 45,
+    slots: new Array(46).fill(null),
+    items: () => invItems.filter((i) => i.count > 0)
+  };
+
+  const stationBlocks = new Map([
+    ['3,64,0', { name: 'furnace', type: 61, boundingBox: 'block', position: new Vec3(3, 64, 0) }],
+    ['4,64,0', { name: 'blast_furnace', type: 62, boundingBox: 'block', position: new Vec3(4, 64, 0) }]
+  ]);
+  bot.blockAt = (pos) => {
+    const p = pos.floored();
+    const k = `${p.x},${p.y},${p.z}`;
+    if (stationBlocks.has(k)) return stationBlocks.get(k);
+    if (p.y === 63) return { name: 'grass_block', type: 2, boundingBox: 'block', position: p };
+    return { name: 'air', type: 0, boundingBox: 'empty', position: p };
+  };
+
+  const usedFuels = [];
+  const stationHistory = [];
+  bot.openFurnace = async (stationBlock) => {
+    const stType = stationBlock.name;
+    let fIn = null;
+    let fFuel = null;
+    let fOut = null;
+    const fWin = new EventEmitter();
+    fWin.slots = [null, null, null];
+    fWin.inputItem = () => fIn;
+    fWin.fuelItem = () => fFuel;
+    fWin.outputItem = () => fOut;
+    fWin.putFuel = async (itemType, _meta, qty) => {
+      const src = invItems.find((i) => i.type === itemType && i.count > 0);
+      assert.ok(src, 'Fuel item must exist');
+      assert.notEqual(src.name, 'gtceu:raw_coal', 'MUST NEVER put unsmelted gtceu:raw_coal into Fuel Slot 1!');
+      usedFuels.push({ name: src.name, qty, station: stType });
+      src.count -= qty;
+      fFuel = { type: itemType, name: src.name, count: qty };
+    };
+    fWin.putInput = async (itemType, _meta, qty) => {
+      const src = invItems.find((i) => i.type === itemType && i.count > 0);
+      assert.ok(src, 'Input item must exist');
+      const rcp = reg.getSmeltingRecipeForInput(src.name, stType);
+      assert.ok(rcp, `Station ${stType} must actually support smelting ${src.name}!`);
+      stationHistory.push({ input: src.name, station: stType, qty });
+      src.count -= qty;
+      const outNumId = [...bridge.numericIdToName.entries()].find(([, v]) => v === rcp.outputId)?.[0] || 9999;
+      fIn = null;
+      fOut = { type: outNumId, name: rcp.outputId, count: qty * (rcp.outputCount || 1) };
+      setImmediate(() => fWin.emit('update'));
+    };
+    fWin.takeOutput = async () => {
+      if (!fOut) return;
+      const existing = invItems.find((i) => i.name === fOut.name);
+      if (existing) existing.count += fOut.count;
+      else invItems.push({ ...fOut, slot: 20 + invItems.length });
+      fOut = null;
+    };
+    fWin.takeInput = async () => {
+      fIn = null;
+    };
+    fWin.close = () => {};
+    return fWin;
+  };
+
+  const engine = new AutonomousProgressionEngine({
+    bot,
+    registryBridge: {
+      toCanonicalItemId: (item) => bridge.numericIdToName.get(item?.type) || item?.name || ''
+    },
+    recipeRegistry: reg,
+    options: { persistState: false, actionDelayScale: 0, cycleTimeoutMs: 120 }
+  });
+  engine.worldState.baseAnchor = { x: 0, y: 64, z: 0 };
+  engine.worldState.stations.furnace = { x: 3, y: 64, z: 0 };
+  engine.worldState.stations.blastFurnace = { x: 4, y: 64, z: 0 };
+
+  const fuelReady = await engine.ensureFurnaceFuel(10);
+  assert.equal(fuelReady, true, 'Should smelt 3x gtceu:raw_coal into 6x minecraft:coal (48 smelts)');
+  assert.equal(engine.countInventory('minecraft:coal'), 6, '3x gtceu:raw_coal -> 6x minecraft:coal');
+  assert.equal(stationHistory[0].station, 'blast_furnace', 'raw_coal blasts in 1-tick blast_furnace');
+
+  const madeSmooth = await engine.smeltToProduceLive('minecraft:smooth_stone', 3);
+  assert.equal(madeSmooth, true, '2-stage cobblestone -> stone -> smooth_stone must complete');
+  assert.equal(engine.countInventory('minecraft:smooth_stone'), 3);
+  const stoneStages = stationHistory.filter((s) => s.input !== 'gtceu:raw_coal');
+  assert.equal(stoneStages.length, 2);
+  assert.equal(stoneStages[0].station, 'furnace', 'cobblestone -> stone must use regular furnace, NEVER blast_furnace');
+  assert.equal(stoneStages[1].station, 'furnace', 'stone -> smooth_stone must use regular furnace, NEVER blast_furnace');
+
+  // 3. Verify 2-block-deep pit physical self-unstick pillars out automatically!
+  const pitPlaced = [];
+  bot.setControlState = () => {};
+  bot.placeBlock = async (refBlock, face) => {
+    pitPlaced.push(refBlock.position.plus(face));
+  };
+  const origBlockAt = bot.blockAt;
+  bot.blockAt = (pos) => {
+    const p = pos.floored();
+    if (p.x === 0 && p.z === 0 && p.y === 61) {
+      return { name: 'stone', type: 1, boundingBox: 'block', position: p };
+    }
+    if (Math.abs(p.x) + Math.abs(p.z) === 1 && (p.y === 62 || p.y === 63)) {
+      return { name: 'dirt', type: 3, boundingBox: 'block', position: p };
+    }
+    return { name: 'air', type: 0, boundingBox: 'empty', position: p };
+  };
+  bot.entity.position = new Vec3(0.5, 62, 0.5);
+  await engine._performPhysicalUnstick(new Vec3(5, 64, 0));
+  assert.equal(pitPlaced.length, 1, 'Trapped bot in 2-block pit should pillar up 1 block automatically');
+  bot.blockAt = origBlockAt;
+});
+
+
+
 

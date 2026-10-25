@@ -30,6 +30,7 @@ const {
   installFastWindowClickShim
 } = require('./statemachine/hierarchy');
 const { AutonomousProgressionEngine } = require('./survival/autonomousProgression');
+const { UniversalRecipeRegistry } = require('./recipes/universalRecipeRegistry');
 
 /**
  * Parses optional CLI flags (`--host`, `--port`, `--username`, `--auth`, `--version`, `--fml2`)
@@ -146,6 +147,7 @@ class GTLAutomationAgent extends EventEmitter {
     this._activeFmlMarker = this.config.fmlMarker || '\0FML3\0';
 
     this.registryBridge = new ForgeRegistryBridge();
+    this.recipeRegistry = new UniversalRecipeRegistry({ registryBridge: this.registryBridge });
     this.warehouse = new WarehouseTracker({ registryBridge: this.registryBridge });
     this.containerController = new ContainerPacketController(null, {
       registryBridge: this.registryBridge,
@@ -299,15 +301,36 @@ class GTLAutomationAgent extends EventEmitter {
           message: `[Forge1201] ${summary.protocol} Handshake complete! Synced ${summary.registriesSynced} registries (${summary.mappedItems} items, ${summary.mappedBlocks} blocks) & ${summary.configsSynced} server configs.`
         });
       });
+
+      bot._client.on('declare_recipes', (pkt) => {
+        if (pkt?.rawRecipes && this.recipeRegistry) {
+          const added = this.recipeRegistry.ingestDeclareRecipesBuffer(
+            pkt.rawRecipes,
+            bot.registry
+          );
+          if (added > 0) {
+            this.emit('log', {
+              level: 'info',
+              message: `[RecipeSync] Ingested ${added} live server crafting/smelting/blasting recipes from declare_recipes.`
+            });
+          }
+        }
+      });
     }
 
-    if (typeof bot.loadPlugin === 'function' && bot.registry) {
-      try {
-        bot.loadPlugin(toolPlugin);
-        bot.loadPlugin(collectBlockPlugin);
-      } catch (_) {
-        // Safe fallback for minimal/mock bot harnesses
+    const loadAuxPlugins = () => {
+      if (typeof bot.loadPlugin === 'function' && bot.registry) {
+        try {
+          if (!bot.tool) bot.loadPlugin(toolPlugin);
+          if (!bot.collectBlock) bot.loadPlugin(collectBlockPlugin);
+        } catch (_) {
+          // Safe fallback for minimal/mock bot harnesses
+        }
       }
+    };
+    loadAuxPlugins();
+    if (typeof bot.once === 'function') {
+      bot.once('inject_allowed', loadAuxPlugins);
     }
 
     this.navigator = new GTNHNavigator(bot, options.navigatorOptions || {});
@@ -332,6 +355,7 @@ class GTLAutomationAgent extends EventEmitter {
       multiblockBuilder: this.multiblockBuilder,
       hazardMonitor: this.hazardMonitor,
       registryBridge: this.registryBridge,
+      recipeRegistry: this.recipeRegistry,
       options: options.progressionOptions || {}
     });
     this.progressionEngine.on('log', (entry) => this.emit('log', entry));
