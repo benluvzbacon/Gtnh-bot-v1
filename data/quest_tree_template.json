@@ -1,0 +1,1317 @@
+{
+  "schemaVersion": "1.0.0",
+  "modpack": "GregTech: New Horizons",
+  "mcVersion": "1.7.10",
+  "forgeVersion": "10.13.4.1614",
+  "metadata": {
+    "description": "GTNH BetterQuesting DAG & JEI/NEI Recipe Registry Database Schema",
+    "voltageTiers": {
+      "STONE": { "tier": 0, "maxEU": 0, "label": "Stone Age" },
+      "STEAM": { "tier": 0.5, "maxEU": 16, "label": "Steam Tier" },
+      "ULV": { "tier": 0.8, "maxEU": 8, "label": "Ultra Low Voltage" },
+      "LV": { "tier": 1, "maxEU": 32, "label": "Low Voltage" },
+      "MV": { "tier": 2, "maxEU": 128, "label": "Medium Voltage" },
+      "HV": { "tier": 3, "maxEU": 512, "label": "High Voltage" },
+      "EV": { "tier": 4, "maxEU": 2048, "label": "Extreme Voltage" },
+      "IV": { "tier": 5, "maxEU": 8192, "label": "Insane Voltage" }
+    }
+  },
+  "eras": [
+    {
+      "eraId": "STONE_AGE",
+      "order": 0,
+      "voltageTier": "STONE",
+      "milestoneQuestIds": ["quest_stone_001", "quest_stone_002", "quest_stone_003"],
+      "exitGateQuestId": "quest_stone_003"
+    },
+    {
+      "eraId": "STEAM_TIER",
+      "order": 1,
+      "voltageTier": "STEAM",
+      "milestoneQuestIds": ["quest_steam_001", "quest_steam_002", "quest_steam_003"],
+      "exitGateQuestId": "quest_steam_003"
+    },
+    {
+      "eraId": "LV_TIER",
+      "order": 2,
+      "voltageTier": "LV",
+      "milestoneQuestIds": ["quest_lv_001", "quest_lv_002", "quest_lv_003"],
+      "exitGateQuestId": "quest_lv_003"
+    },
+    {
+      "eraId": "MV_TIER",
+      "order": 3,
+      "voltageTier": "MV",
+      "milestoneQuestIds": ["quest_mv_001"],
+      "exitGateQuestId": "quest_mv_001"
+    },
+    {
+      "eraId": "HV_TIER",
+      "order": 4,
+      "voltageTier": "HV",
+      "milestoneQuestIds": ["quest_hv_001"],
+      "exitGateQuestId": "quest_hv_001"
+    }
+  ],
+  "quests": [
+    {
+      "questId": "quest_stone_001",
+      "bqNumericId": 1,
+      "name": "Welcome to New Horizons: Flint & Timber",
+      "era": "STONE_AGE",
+      "dependencies": [],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "retrieval",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "minecraft:log:0", "count": 16, "label": "Oak Wood" },
+            { "itemId": "minecraft:flint:0", "count": 6, "label": "Flint" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "dreamcraft:item.CoinSurvivorI:0", "count": 5 },
+          { "itemId": "harvestcraft:beefwellingtonItem:0", "count": 4 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_stone_002",
+      "bqNumericId": 14,
+      "name": "Clay, Brick Dust, and Fireclay",
+      "era": "STONE_AGE",
+      "dependencies": ["quest_stone_001"],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:2805", "count": 64, "label": "Fireclay Dust" },
+            { "itemId": "dreamcraft:item.CompressedFireClay:0", "count": 64, "label": "Compressed Fireclay" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "dreamcraft:item.CoinTechnician:0", "count": 10 }
+        ],
+        "choices": [
+          { "itemId": "minecraft:clay_ball:0", "count": 32 },
+          { "itemId": "minecraft:brick:0", "count": 32 }
+        ]
+      }
+    },
+    {
+      "questId": "quest_stone_003",
+      "bqNumericId": 28,
+      "name": "Bronze Age Preparation",
+      "era": "STONE_AGE",
+      "dependencies": ["quest_stone_002"],
+      "dependencyLogic": "AND",
+      "unlocksEra": "STEAM_TIER",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:11300", "count": 16, "label": "Bronze Ingot" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "betterquesting:extra_life:0", "count": 1 },
+          { "itemId": "enhancedlootbags:lootbag:1", "count": 1 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_steam_001",
+      "bqNumericId": 62,
+      "name": "High Pressure & Steam Alloy Smelting",
+      "era": "STEAM_TIER",
+      "dependencies": ["quest_stone_003"],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.blockmachines:100", "count": 1, "label": "Small Coal Boiler" },
+            { "itemId": "gregtech:gt.blockmachines:110", "count": 1, "label": "Steam Alloy Smelter" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "dreamcraft:item.CoinTechnicianI:0", "count": 5 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_steam_002",
+      "bqNumericId": 95,
+      "name": "Bricked Blast Furnace (Primitive Blast Furnace)",
+      "era": "STEAM_TIER",
+      "dependencies": ["quest_steam_001", "quest_stone_002"],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.blockmachines:1400", "count": 1, "label": "Primitive Blast Furnace Controller" },
+            { "itemId": "gregtech:gt.blockcasings4:15", "count": 30, "label": "Firebricks" },
+            { "itemId": "gregtech:gt.blockmachines:151", "count": 1, "label": "ULV Input Hatch" },
+            { "itemId": "gregtech:gt.blockmachines:161", "count": 1, "label": "ULV Output Hatch" }
+          ]
+        },
+        {
+          "taskIndex": 1,
+          "type": "multiblock",
+          "blueprintId": "primitive_blast_furnace",
+          "blueprintPath": "data/primitive_blast_furnace.json"
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:2", "count": 1 },
+          { "itemId": "minecraft:coal:1", "count": 64 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_steam_003",
+      "bqNumericId": 112,
+      "name": "First Steel!",
+      "era": "STEAM_TIER",
+      "dependencies": ["quest_steam_002"],
+      "dependencyLogic": "AND",
+      "unlocksEra": "LV_TIER",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "retrieval",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:11305", "count": 32, "label": "Steel Ingot" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:4", "count": 1 },
+          { "itemId": "dreamcraft:item.CoinSmithI:0", "count": 10 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_lv_001",
+      "bqNumericId": 150,
+      "name": "Your First Electronic Circuit (LV)",
+      "era": "LV_TIER",
+      "dependencies": ["quest_steam_003"],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:32700", "count": 2, "label": "LV Electronic Circuit" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:5", "count": 1 },
+          { "itemId": "gregtech:gt.integrated_circuit:0", "count": 2 }
+        ],
+        "choices": [
+          { "itemId": "gregtech:gt.metaitem.01:32705", "count": 4 },
+          { "itemId": "gregtech:gt.metaitem.01:32706", "count": 4 }
+        ]
+      }
+    },
+    {
+      "questId": "quest_lv_002",
+      "bqNumericId": 168,
+      "name": "Basic Bending Machine & Programmed Circuits",
+      "era": "LV_TIER",
+      "dependencies": ["quest_lv_001"],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.blockmachines:211", "count": 1, "label": "Basic Bending Machine (LV)" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:5", "count": 1 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_lv_003",
+      "bqNumericId": 215,
+      "name": "Electric Blast Furnace & Aluminium",
+      "era": "LV_TIER",
+      "dependencies": ["quest_lv_002"],
+      "dependencyLogic": "AND",
+      "unlocksEra": "MV_TIER",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "multiblock",
+          "blueprintId": "electric_blast_furnace",
+          "blueprintPath": "data/electric_blast_furnace.json"
+        },
+        {
+          "taskIndex": 1,
+          "type": "retrieval",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:11019", "count": 16, "label": "Aluminium Ingot" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:6", "count": 1 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_mv_001",
+      "bqNumericId": 340,
+      "name": "Good Electronic Circuits & Silicon Processing",
+      "era": "MV_TIER",
+      "dependencies": ["quest_lv_003"],
+      "dependencyLogic": "AND",
+      "unlocksEra": "HV_TIER",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "crafting",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:32701", "count": 4, "label": "Good Electronic Circuit (MV)" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:7", "count": 1 }
+        ],
+        "choices": []
+      }
+    },
+    {
+      "questId": "quest_hv_001",
+      "bqNumericId": 512,
+      "name": "Cleanroom & Stainless Steel Mastery",
+      "era": "HV_TIER",
+      "dependencies": ["quest_mv_001"],
+      "dependencyLogic": "AND",
+      "tasks": [
+        {
+          "taskIndex": 0,
+          "type": "retrieval",
+          "consume": false,
+          "requiredItems": [
+            { "itemId": "gregtech:gt.metaitem.01:11306", "count": 32, "label": "Stainless Steel Ingot" }
+          ]
+        }
+      ],
+      "rewards": {
+        "guaranteed": [
+          { "itemId": "enhancedlootbags:lootbag:8", "count": 1 }
+        ],
+        "choices": []
+      }
+    }
+  ],
+  "recipes": [
+    {
+      "recipeId": "rcp_planks_oak",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 10,
+      "inputs": [
+        { "itemId": "minecraft:log:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:planks:0", "count": 2 }
+      ]
+    },
+    {
+      "recipeId": "rcp_wood_pulp_mortar",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "nonConsumedTools": ["gregtech:gt.metatool.01:24"],
+      "inputs": [
+        { "itemId": "minecraft:log:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2809", "count": 2, "label": "Wood Pulp" }
+      ]
+    },
+    {
+      "recipeId": "rcp_wooden_form_brick",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "minecraft:planks:0", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "dreamcraft:item.WoodenBrickForm:0", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_clay_dust_mortar",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "minecraft:clay_ball:0", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2804", "count": 1, "label": "Clay Dust" }
+      ]
+    },
+    {
+      "recipeId": "rcp_brick_dust_mortar",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "minecraft:brick:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2815", "count": 1, "label": "Brick Dust" }
+      ]
+    },
+    {
+      "recipeId": "rcp_vanilla_brick_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:clay_ball:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:brick:0", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_fireclay_dust",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 15,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2804", "count": 1 },
+        { "itemId": "gregtech:gt.metaitem.01:2815", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2805", "count": 2, "label": "Fireclay Dust" }
+      ]
+    },
+    {
+      "recipeId": "rcp_compressed_fireclay",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 15,
+      "nonConsumedTools": ["dreamcraft:item.WoodenBrickForm:0"],
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2805", "count": 8 }
+      ],
+      "outputs": [
+        { "itemId": "dreamcraft:item.CompressedFireClay:0", "count": 8 }
+      ]
+    },
+    {
+      "recipeId": "rcp_firebrick_item_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "dreamcraft:item.CompressedFireClay:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "dreamcraft:item.Firebrick:0", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_gypsum_dust_smelt_calcite",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 15,
+      "inputs": [
+        { "itemId": "minecraft:cobblestone:0", "count": 2 },
+        { "itemId": "minecraft:clay_ball:0", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:WaterBucket_MortarMix:0", "count": 2, "label": " Refractory Grout Mix" }
+      ]
+    },
+    {
+      "recipeId": "rcp_firebricks_block",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "dreamcraft:item.Firebrick:0", "count": 6 },
+        { "itemId": "gregtech:gt.metaitem.01:2805", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockcasings4:15", "count": 1, "label": "Firebricks" }
+      ]
+    },
+    {
+      "recipeId": "rcp_pbf_controller",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 40,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockcasings4:15", "count": 4 },
+        { "itemId": "minecraft:furnace:0", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:17032", "count": 3, "label": "Iron Plate" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:1400", "count": 1, "label": "Primitive Blast Furnace Controller" }
+      ]
+    },
+    {
+      "recipeId": "rcp_furnace_cobble",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "minecraft:cobblestone:0", "count": 8 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:furnace:0", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_iron_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:iron_ore:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:iron_ingot:0", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_copper_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockores:35", "count": 1, "label": "Copper Ore" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11035", "count": 1, "label": "Copper Ingot" }
+      ]
+    },
+    {
+      "recipeId": "rcp_tin_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockores:57", "count": 1, "label": "Tin Ore" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11057", "count": 1, "label": "Tin Ingot" }
+      ]
+    },
+    {
+      "recipeId": "rcp_bronze_ingot_alloy",
+      "machine": "gt_steam_machine",
+      "subMachine": "steam_alloy_smelter",
+      "voltageTier": "STEAM",
+      "euPerTick": 16,
+      "durationTicks": 100,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11035", "count": 3 },
+        { "itemId": "gregtech:gt.metaitem.01:11057", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11300", "count": 4, "label": "Bronze Ingot" }
+      ]
+    },
+    {
+      "recipeId": "rcp_iron_plate_hammer",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 30,
+      "inputs": [
+        { "itemId": "minecraft:iron_ingot:0", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17032", "count": 1, "label": "Iron Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_ulv_machine_casing",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "programmedCircuit": 8,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17304", "count": 8, "label": "Wrought Iron Plate" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockcasings:0", "count": 1, "label": "ULV Machine Casing" }
+      ]
+    },
+    {
+      "recipeId": "rcp_wrought_iron_ingot",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:iron_ingot:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11304", "count": 1, "label": "Wrought Iron Ingot" }
+      ]
+    },
+    {
+      "recipeId": "rcp_wrought_iron_plate",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11304", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17304", "count": 1, "label": "Wrought Iron Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_ulv_input_hatch",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockcasings:0", "count": 1 },
+        { "itemId": "minecraft:glass:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:151", "count": 1, "label": "ULV Input Hatch" }
+      ]
+    },
+    {
+      "recipeId": "rcp_ulv_output_hatch",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "minecraft:glass:0", "count": 1 },
+        { "itemId": "gregtech:gt.blockcasings:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:161", "count": 1, "label": "ULV Output Hatch" }
+      ]
+    },
+    {
+      "recipeId": "rcp_glass_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:sand:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:glass:0", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_steel_ingot_pbf",
+      "machine": "gt_primitive_blast_furnace",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 3600,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11304", "count": 1 },
+        { "itemId": "minecraft:coal:1", "count": 2, "label": "Charcoal" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11305", "count": 1, "label": "Steel Ingot" },
+        { "itemId": "gregtech:gt.metaitem.01:816", "count": 2, "label": "Tiny Pile of Dark Ashes" }
+      ]
+    },
+    {
+      "recipeId": "rcp_charcoal_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:log:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:coal:1", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_steel_nugget_split",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 10,
+      "isStorageDecompression": false,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11305", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:9305", "count": 9, "label": "Steel Nugget" }
+      ]
+    },
+    {
+      "recipeId": "rcp_steel_ingot_from_nuggets_cycle",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 10,
+      "isStorageRecompression": true,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:9305", "count": 9 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11305", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_steel_plate_hammer",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 30,
+      "priority": 1,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11305", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17305", "count": 1, "label": "Steel Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_steel_plate_bender",
+      "machine": "gt_lv_bender",
+      "voltageTier": "LV",
+      "euPerTick": 24,
+      "durationTicks": 56,
+      "programmedCircuit": 1,
+      "priority": 10,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11305", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17305", "count": 1, "label": "Steel Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_curved_tin_cell_bender_c14",
+      "machine": "gt_lv_bender",
+      "voltageTier": "LV",
+      "euPerTick": 16,
+      "durationTicks": 80,
+      "programmedCircuit": 14,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17057", "count": 2, "label": "Tin Plate" }
+      ],
+      "outputs": [
+        { "itemId": "IC2:itemCellEmpty:0", "count": 1, "label": "Empty Fluid Cell" }
+      ]
+    },
+    {
+      "recipeId": "rcp_tin_plate_bender",
+      "machine": "gt_lv_bender",
+      "voltageTier": "LV",
+      "euPerTick": 24,
+      "durationTicks": 40,
+      "programmedCircuit": 1,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11057", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17057", "count": 1, "label": "Tin Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_steel_rod_file",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 30,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11305", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:23305", "count": 1, "label": "Steel Rod" }
+      ]
+    },
+    {
+      "recipeId": "rcp_red_alloy_ingot",
+      "machine": "gt_steam_machine",
+      "subMachine": "steam_alloy_smelter",
+      "voltageTier": "STEAM",
+      "euPerTick": 16,
+      "durationTicks": 100,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11035", "count": 1 },
+        { "itemId": "minecraft:redstone:0", "count": 4 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11308", "count": 1, "label": "Red Alloy Ingot" }
+      ]
+    },
+    {
+      "recipeId": "rcp_red_alloy_plate",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11308", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17308", "count": 1, "label": "Red Alloy Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_red_alloy_wire_cutters",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "priority": 1,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17308", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:1360", "count": 1, "label": "1x Red Alloy Wire" }
+      ]
+    },
+    {
+      "recipeId": "rcp_red_alloy_wire_wiremill",
+      "machine": "gt_lv_wiremill",
+      "voltageTier": "LV",
+      "euPerTick": 16,
+      "durationTicks": 100,
+      "programmedCircuit": 1,
+      "priority": 10,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11308", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:1360", "count": 2, "label": "1x Red Alloy Wire" }
+      ]
+    },
+    {
+      "recipeId": "rcp_red_alloy_rod",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11308", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:23308", "count": 1, "label": "Red Alloy Rod" }
+      ]
+    },
+    {
+      "recipeId": "rcp_red_alloy_bolt",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:23308", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:26308", "count": 2, "label": "Red Alloy Bolt" }
+      ]
+    },
+    {
+      "recipeId": "rcp_copper_plate",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11035", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17035", "count": 1, "label": "Copper Plate" }
+      ]
+    },
+    {
+      "recipeId": "rcp_copper_wire",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17035", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 1, "label": "1x Copper Wire" }
+      ]
+    },
+    {
+      "recipeId": "rcp_fine_copper_wire",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17035", "count": 1 },
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.02:19035", "count": 3, "label": "Fine Copper Wire" }
+      ]
+    },
+    {
+      "recipeId": "rcp_rubber_ingot",
+      "machine": "gt_steam_machine",
+      "subMachine": "steam_alloy_smelter",
+      "voltageTier": "STEAM",
+      "euPerTick": 16,
+      "durationTicks": 100,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2880", "count": 3, "label": "Raw Rubber Pulp" },
+        { "itemId": "gregtech:gt.metaitem.01:2022", "count": 1, "label": "Sulfur Dust" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11880", "count": 1, "label": "Rubber Bar" }
+      ]
+    },
+    {
+      "recipeId": "rcp_raw_rubber_pulp",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "IC2:itemHarz:0", "count": 1, "label": "Sticky Resin" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2880", "count": 1, "label": "Raw Rubber Pulp" }
+      ]
+    },
+    {
+      "recipeId": "rcp_rubber_sheet",
+      "machine": "gt_steam_machine",
+      "subMachine": "steam_alloy_smelter",
+      "voltageTier": "STEAM",
+      "euPerTick": 16,
+      "durationTicks": 80,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11880", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17880", "count": 1, "label": "Rubber Sheet" }
+      ]
+    },
+    {
+      "recipeId": "rcp_insulated_copper_cable",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 15,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 1 },
+        { "itemId": "gregtech:gt.metaitem.01:17880", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:1367", "count": 1, "label": "1x Copper Cable" }
+      ]
+    },
+    {
+      "recipeId": "rcp_glass_dust",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "minecraft:glass:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2890", "count": 1, "label": "Glass Dust" }
+      ]
+    },
+    {
+      "recipeId": "rcp_glass_tube",
+      "machine": "gt_steam_machine",
+      "subMachine": "steam_alloy_smelter",
+      "voltageTier": "STEAM",
+      "euPerTick": 16,
+      "durationTicks": 120,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2890", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32704", "count": 1, "label": "Glass Tube" }
+      ]
+    },
+    {
+      "recipeId": "rcp_vacuum_tube",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 35,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32704", "count": 1 },
+        { "itemId": "gregtech:gt.metaitem.01:26308", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:23305", "count": 2 },
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32705", "count": 1, "label": "Vacuum Tube" }
+      ]
+    },
+    {
+      "recipeId": "rcp_coal_dust_mortar",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "minecraft:coal:1", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2536", "count": 1, "label": "Charcoal Dust" }
+      ]
+    },
+    {
+      "recipeId": "rcp_paper_wood_pulp",
+      "machine": "crafting_table",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2809", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:paper:0", "count": 2 }
+      ]
+    },
+    {
+      "recipeId": "rcp_resistor_hand",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 35,
+      "inputs": [
+        { "itemId": "IC2:itemHarz:0", "count": 2 },
+        { "itemId": "minecraft:paper:0", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:2536", "count": 1 },
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.02:19035", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32706", "count": 1, "label": "Resistor" }
+      ]
+    },
+    {
+      "recipeId": "rcp_wood_plank_plate",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:2809", "count": 2 },
+        { "itemId": "IC2:itemHarz:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17809", "count": 1, "label": "Wood Plank (Compressed Plate)" }
+      ]
+    },
+    {
+      "recipeId": "rcp_coated_circuit_board",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17809", "count": 3 },
+        { "itemId": "IC2:itemHarz:0", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32710", "count": 3, "label": "Coated Circuit Board" }
+      ]
+    },
+    {
+      "recipeId": "rcp_basic_circuit_board",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32710", "count": 1 },
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 8 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32711", "count": 1, "label": "Basic Circuit Board" }
+      ]
+    },
+    {
+      "recipeId": "rcp_lv_electronic_circuit_hand",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 50,
+      "priority": 5,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32711", "count": 1, "label": "Basic Circuit Board" },
+        { "itemId": "gregtech:gt.metaitem.01:32705", "count": 2, "label": "Vacuum Tube" },
+        { "itemId": "gregtech:gt.metaitem.01:32706", "count": 2, "label": "Resistor" },
+        { "itemId": "gregtech:gt.blockmachines:1360", "count": 3, "label": "1x Red Alloy Wire" },
+        { "itemId": "gregtech:gt.metaitem.01:17305", "count": 1, "label": "Steel Plate" }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32700", "count": 1, "label": "LV Electronic Circuit" }
+      ]
+    },
+    {
+      "recipeId": "rcp_lv_electronic_circuit_assembler",
+      "machine": "gt_lv_circuit_assembler",
+      "voltageTier": "LV",
+      "euPerTick": 16,
+      "durationTicks": 200,
+      "programmedCircuit": 1,
+      "priority": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32711", "count": 1 },
+        { "itemId": "gregtech:gt.metaitem.01:32705", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:32706", "count": 2 },
+        { "itemId": "gregtech:gt.blockmachines:1360", "count": 2 }
+      ],
+      "fluidInputs": [
+        { "fluidId": "fluid:molten.solderingalloy", "amountMb": 72 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32700", "count": 2, "label": "LV Electronic Circuit" }
+      ]
+    },
+    {
+      "recipeId": "rcp_lv_machine_casing",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17305", "count": 8 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockcasings:1", "count": 1, "label": "LV Machine Casing" }
+      ]
+    },
+    {
+      "recipeId": "rcp_lv_machine_hull",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 25,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockcasings:1", "count": 1 },
+        { "itemId": "gregtech:gt.metaitem.01:17304", "count": 2 },
+        { "itemId": "gregtech:gt.blockmachines:1367", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:11", "count": 1, "label": "LV Machine Hull" }
+      ]
+    },
+    {
+      "recipeId": "rcp_tin_cable_1x",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 20,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:11057", "count": 1 },
+        { "itemId": "gregtech:gt.metaitem.01:17880", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:1227", "count": 1, "label": "1x Tin Cable" }
+      ]
+    },
+    {
+      "recipeId": "rcp_lv_electric_motor",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 35,
+      "inputs": [
+        { "itemId": "gregtech:gt.blockmachines:1227", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:23305", "count": 2 },
+        { "itemId": "gregtech:gt.blockmachines:1366", "count": 4 },
+        { "itemId": "minecraft:iron_ingot:0", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32600", "count": 1, "label": "Electric Motor (LV)" }
+      ]
+    },
+    {
+      "recipeId": "rcp_lv_electric_piston",
+      "machine": "crafting_table",
+      "voltageTier": "STEAM",
+      "euPerTick": 0,
+      "durationTicks": 35,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:17305", "count": 3 },
+        { "itemId": "gregtech:gt.metaitem.01:23305", "count": 2 },
+        { "itemId": "gregtech:gt.blockmachines:1227", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:32600", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32640", "count": 1, "label": "Electric Piston (LV)" }
+      ]
+    },
+    {
+      "recipeId": "rcp_basic_bending_machine",
+      "machine": "crafting_table",
+      "voltageTier": "LV",
+      "euPerTick": 0,
+      "durationTicks": 40,
+      "inputs": [
+        { "itemId": "gregtech:gt.metaitem.01:32640", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:32600", "count": 2 },
+        { "itemId": "gregtech:gt.metaitem.01:32700", "count": 2 },
+        { "itemId": "gregtech:gt.blockmachines:11", "count": 1 },
+        { "itemId": "gregtech:gt.blockmachines:1227", "count": 2 }
+      ],
+      "outputs": [
+        { "itemId": "gregtech:gt.blockmachines:211", "count": 1, "label": "Basic Bending Machine (LV)" }
+      ]
+    }
+  ],
+  "windowProfiles": {
+    "crafting_table": {
+      "titlePattern": "Crafting",
+      "containerSlotCount": 10,
+      "outputSlots": [0],
+      "inputSlots": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      "playerInventoryOffset": 10
+    },
+    "furnace": {
+      "titlePattern": "Furnace",
+      "containerSlotCount": 3,
+      "inputSlots": [0],
+      "fuelSlots": [1],
+      "outputSlots": [2],
+      "playerInventoryOffset": 3
+    },
+    "gt_steam_machine": {
+      "titlePattern": "Steam",
+      "containerSlotCount": 6,
+      "inputSlots": [0, 1],
+      "outputSlots": [2, 3],
+      "specialSlot": 4,
+      "ventStatusSlot": 5,
+      "playerInventoryOffset": 6
+    },
+    "gt_primitive_blast_furnace": {
+      "titlePattern": "Bricked Blast Furnace|Primitive Blast Furnace",
+      "containerSlotCount": 6,
+      "inputSlots": [0, 1, 2],
+      "outputSlots": [3, 4, 5],
+      "playerInventoryOffset": 6
+    },
+    "gt_lv_bender": {
+      "titlePattern": "Bending Machine",
+      "containerSlotCount": 8,
+      "batterySlot": 0,
+      "inputSlots": [1],
+      "outputSlots": [2],
+      "circuitSlot": 3,
+      "ghostCircuitSelectorSlot": 4,
+      "fluidInputSlots": [],
+      "fluidOutputSlots": [],
+      "playerInventoryOffset": 8
+    },
+    "gt_lv_wiremill": {
+      "titlePattern": "Wiremill",
+      "containerSlotCount": 8,
+      "batterySlot": 0,
+      "inputSlots": [1],
+      "outputSlots": [2],
+      "circuitSlot": 3,
+      "ghostCircuitSelectorSlot": 4,
+      "playerInventoryOffset": 8
+    },
+    "gt_lv_circuit_assembler": {
+      "titlePattern": "Circuit Assembler",
+      "containerSlotCount": 12,
+      "batterySlot": 0,
+      "inputSlots": [1, 2, 3, 4, 5, 6],
+      "fluidInputSlots": [7],
+      "outputSlots": [8],
+      "circuitSlot": 9,
+      "ghostCircuitSelectorSlot": 10,
+      "playerInventoryOffset": 12
+    },
+    "gt_multiblock_maintenance_hatch": {
+      "titlePattern": "Maintenance Hatch",
+      "containerSlotCount": 4,
+      "toolInputSlot": 0,
+      "ductTapeSlot": 1,
+      "playerInventoryOffset": 4
+    }
+  }
+}

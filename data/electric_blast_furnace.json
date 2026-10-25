@@ -1,0 +1,164 @@
+{
+  "schemaVersion": "1.0.0",
+  "blueprintId": "electric_blast_furnace",
+  "displayName": "Electric Blast Furnace (Cupronickel Dual-LV Setup)",
+  "modpack": "GregTech: New Horizons",
+  "era": "LV_TIER",
+  "dimensions": {
+    "width": 3,
+    "height": 4,
+    "depth": 3
+  },
+  "canonicalFacing": "NORTH",
+  "anchorGridIndex": {
+    "x": 1,
+    "y": 0,
+    "z": 0
+  },
+  "palette": {
+    "C": {
+      "itemId": "gregtech:gt.blockmachines:1000",
+      "blockName": "gt.blockmachines",
+      "metadata": 1000,
+      "role": "controller",
+      "facing": "front",
+      "sneakPlace": true,
+      "label": "Electric Blast Furnace Controller"
+    },
+    "H": {
+      "itemId": "gregtech:gt.blockcasings:11",
+      "blockName": "gt.blockcasings",
+      "metadata": 11,
+      "role": "casing",
+      "sneakPlace": false,
+      "label": "Heat Proof Machine Casing"
+    },
+    "K": {
+      "itemId": "gregtech:gt.blockcasings5:0",
+      "blockName": "gt.blockcasings5",
+      "metadata": 0,
+      "role": "coil",
+      "sneakPlace": false,
+      "label": "Cupronickel Coil Block"
+    },
+    "B": {
+      "itemId": "gregtech:gt.blockmachines:71",
+      "blockName": "gt.blockmachines",
+      "metadata": 71,
+      "role": "input_bus",
+      "facing": "west",
+      "sneakPlace": true,
+      "label": "LV Input Bus"
+    },
+    "I": {
+      "itemId": "gregtech:gt.blockmachines:51",
+      "blockName": "gt.blockmachines",
+      "metadata": 51,
+      "role": "input_hatch",
+      "facing": "west",
+      "sneakPlace": true,
+      "label": "LV Input Hatch"
+    },
+    "O": {
+      "itemId": "gregtech:gt.blockmachines:81",
+      "blockName": "gt.blockmachines",
+      "metadata": 81,
+      "role": "output_bus",
+      "facing": "east",
+      "sneakPlace": true,
+      "label": "LV Output Bus"
+    },
+    "M": {
+      "itemId": "gregtech:gt.blockmachines:90",
+      "blockName": "gt.blockmachines",
+      "metadata": 90,
+      "role": "maintenance_hatch",
+      "facing": "front",
+      "sneakPlace": true,
+      "label": "Maintenance Hatch"
+    },
+    "E": {
+      "itemId": "gregtech:gt.blockmachines:41",
+      "blockName": "gt.blockmachines",
+      "metadata": 41,
+      "role": "energy_hatch",
+      "facing": "back",
+      "voltageTier": "LV",
+      "sneakPlace": true,
+      "label": "LV Energy Hatch"
+    },
+    "U": {
+      "itemId": "gregtech:gt.blockmachines:91",
+      "blockName": "gt.blockmachines",
+      "metadata": 91,
+      "role": "muffler_hatch",
+      "facing": "up",
+      "sneakPlace": true,
+      "label": "LV Muffler Hatch"
+    },
+    ".": {
+      "itemId": "minecraft:air:0",
+      "blockName": "air",
+      "metadata": 0,
+      "role": "air",
+      "label": "Interior Hollow Cavity (Air)"
+    }
+  },
+  "layers": [
+    {
+      "yIndex": 0,
+      "relativeY": 0,
+      "description": "Bottom casing & hatch layer (Controller front-center at [0,0,0], Maintenance, Buses, Energy Hatches)",
+      "matrix": [
+        ["M", "C", "H"],
+        ["B", "H", "O"],
+        ["E", "I", "E"]
+      ]
+    },
+    {
+      "yIndex": 1,
+      "relativeY": 1,
+      "description": "Lower heating coil ring (8 Cupronickel Coils, hollow center)",
+      "matrix": [
+        ["K", "K", "K"],
+        ["K", ".", "K"],
+        ["K", "K", "K"]
+      ]
+    },
+    {
+      "yIndex": 2,
+      "relativeY": 2,
+      "description": "Upper heating coil ring (8 Cupronickel Coils, hollow center)",
+      "matrix": [
+        ["K", "K", "K"],
+        ["K", ".", "K"],
+        ["K", "K", "K"]
+      ]
+    },
+    {
+      "yIndex": 3,
+      "relativeY": 3,
+      "description": "Top Heat Proof Casing cap with center Muffler Hatch facing sky",
+      "matrix": [
+        ["H", "H", "H"],
+        ["H", "U", "H"],
+        ["H", "H", "H"]
+      ]
+    }
+  ],
+  "gtnhConstraints": {
+    "minCasings": 9,
+    "requiredRoles": [
+      "controller",
+      "casing",
+      "coil",
+      "input_bus",
+      "output_bus",
+      "maintenance_hatch",
+      "energy_hatch",
+      "muffler_hatch"
+    ],
+    "requiresMaintenance": true,
+    "openChimneyRelativeOffset": { "x": 0, "y": 4, "z": 1 }
+  }
+}
