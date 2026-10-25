@@ -1,8 +1,0 @@
-# GregTech Leisure Low-Spec Overrides for config/gtlcore.yaml
-# Preserves GTL progression (durationMultiplier: 0.05, oreMultiplier: 4) while cutting
-# client animation passes and AE2 / mob-spawn CPU tick pressure on weak processors.
-enableSmoothAnimations: false
-mobSpawnInterval: 80
-ae2CraftingServiceUpdateInterval: 8
-ae2StorageServiceUpdateInterval: 32
-ae2CalculationMode: ULTRA_FAST
