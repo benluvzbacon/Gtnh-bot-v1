@@ -11,6 +11,9 @@ const {
   guardWindowSlot0Listeners
 } = require('../statemachine/hierarchy');
 const { SAFE_WATER_BLOCK_NAMES } = require('../navigation/gtnhNavigator');
+const { UniversalRecipeRegistry } = require('../recipes/universalRecipeRegistry');
+
+const SHARED_RECIPE_REGISTRY = new UniversalRecipeRegistry();
 
 const VANILLA_LOG_BLOCKS = [
   'oak_log',
@@ -180,11 +183,26 @@ function matchesItemSpec(canonicalId, spec) {
     case '#stone_smeltable':
       return id === 'minecraft:cobblestone';
     case '#furnace_fuel':
+      return SHARED_RECIPE_REGISTRY.isValidFurnaceFuel(id);
+    case '#burnable_coal':
       return (
-        ORE_CATEGORY_MATCHERS.coal(id) ||
-        id.endsWith('_planks') ||
-        id.endsWith('_log') ||
-        id === 'minecraft:stick'
+        id === 'minecraft:coal' ||
+        id === 'minecraft:charcoal' ||
+        id === 'gtceu:coke_gem' ||
+        id === 'gtceu:lignite_gem' ||
+        id === 'gtceu:lignite_coal' ||
+        id === 'gtceu:coal_dust' ||
+        id === 'gtceu:charcoal_dust'
+      );
+    case '#raw_coal':
+      return (
+        id === 'gtceu:raw_coal' ||
+        id === 'gtceu:raw_lignite_coal' ||
+        id === 'minecraft:coal_ore' ||
+        id === 'minecraft:deepslate_coal_ore' ||
+        id === 'gtceu:coal_ore' ||
+        id === 'gtceu:deepslate_coal_ore' ||
+        id === 'gtceu:lignite_coal_ore'
       );
     case '#pickaxe':
       return id.endsWith('_pickaxe') || (id.startsWith('gtceu:') && id.includes('pickaxe'));
@@ -253,6 +271,7 @@ class AutonomousProgressionEngine extends EventEmitter {
     multiblockBuilder,
     hazardMonitor,
     registryBridge,
+    recipeRegistry,
     options = {}
   }) {
     super();
@@ -271,13 +290,15 @@ class AutonomousProgressionEngine extends EventEmitter {
           return raw.includes(':') ? raw : `minecraft:${raw}`;
         }
       };
+    this.recipeRegistry =
+      recipeRegistry || new UniversalRecipeRegistry({ registryBridge: this.registryBridge });
 
     this.stateFilePath =
       options.stateFilePath ??
       path.resolve(process.cwd(), '.gtl-runtime-state.json');
     this.persistState = options.persistState ?? true;
     this.stepIntervalMs = options.stepIntervalMs ?? 55;
-    this.cycleTimeoutMs = options.cycleTimeoutMs ?? 35000;
+    this.cycleTimeoutMs = options.cycleTimeoutMs ?? 45000;
     this.searchRadius = options.searchRadius ?? 64;
     this.actionDelayScale = options.actionDelayScale ?? 1;
 
@@ -311,6 +332,8 @@ class AutonomousProgressionEngine extends EventEmitter {
     this._running = false;
     this._loopBusy = false;
     this._loopTimer = null;
+    this._activeCycleId = 0;
+    this._lastActivityTs = Date.now();
     this._currentMilestoneId = 'IDLE';
     this._lastLoggedStatus = '';
     this._needsBodyReconcile = true;
@@ -592,7 +615,16 @@ class AutonomousProgressionEngine extends EventEmitter {
     );
   }
 
+  touchActivity() {
+    this._lastActivityTs = Date.now();
+  }
+
+  _isCycleAborted(cycleId) {
+    return typeof cycleId === 'number' && cycleId !== this._activeCycleId;
+  }
+
   async _recoverFromStall(reason = 'cycle watchdog') {
+    this._activeCycleId++;
     this._log('warn', `Watchdog recovering stalled action (${reason}) — resetting window & pathfinder...`);
     try {
       this._sharedTableWindow = null;
@@ -603,6 +635,13 @@ class AutonomousProgressionEngine extends EventEmitter {
       // Safe cleanup
     }
     this.navigator?.stop?.();
+    if (typeof this.bot?.clearControlStates === 'function') {
+      try {
+        this.bot.clearControlStates();
+      } catch (_) {
+        // Ignore
+      }
+    }
     this.unreachableBlacklist.clear();
     if (this.navigator?.isBotInWater?.() && typeof this.navigator.swimToSafety === 'function') {
       await this.navigator.swimToSafety(6000);
@@ -616,7 +655,7 @@ class AutonomousProgressionEngine extends EventEmitter {
     if (this._running) return;
     this._running = true;
     this._needsBodyReconcile = true;
-    installFastWindowClickShim(this.bot);
+    installFastWindowClickShim(this.bot, { slot0TimeoutMs: this.slot0TimeoutMs });
 
     this._log(
       'info',
@@ -625,6 +664,7 @@ class AutonomousProgressionEngine extends EventEmitter {
 
     if (typeof this.bot?.on === 'function') {
       this._onDeath = () => {
+        this._activeCycleId++;
         this._log('warn', 'Bot died! Waiting for respawn to recover and continue progression...');
         this._sharedTableWindow = null;
         this.navigator?.stop();
@@ -641,21 +681,34 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (!this._running) return;
       if (!this._loopBusy) {
         this._loopBusy = true;
-        let watchdogTimer = null;
+        this._activeCycleId++;
+        this.touchActivity();
+        let watchdogInterval = null;
+        let cyclePromise = null;
         try {
+          cyclePromise = this.runSingleCycle();
           await Promise.race([
-            this.runSingleCycle(),
+            cyclePromise,
             new Promise((_, reject) => {
-              watchdogTimer = setTimeout(
-                () => reject(new Error(`Cycle exceeded ${this.cycleTimeoutMs}ms watchdog`)),
-                this.cycleTimeoutMs
-              );
-              watchdogTimer.unref?.();
+              const pollMs = Math.min(2000, Math.max(100, Math.floor(this.cycleTimeoutMs / 4)));
+              watchdogInterval = setInterval(() => {
+                if (Date.now() - this._lastActivityTs >= this.cycleTimeoutMs) {
+                  clearInterval(watchdogInterval);
+                  watchdogInterval = null;
+                  reject(new Error(`No progress for ${this.cycleTimeoutMs}ms`));
+                }
+              }, pollMs);
+              watchdogInterval.unref?.();
             })
           ]);
         } catch (err) {
           this._log('warn', `Recovered from cycle interruption: ${err.message}`);
           await this._recoverFromStall(err?.message || 'cycle interruption');
+          // Wait for the aborted `runSingleCycle()` promise to settle after `navigator.stop()` +
+          // `closeWindow()` so two concurrent cycles NEVER fight over `bot.pathfinder`!
+          if (cyclePromise) {
+            await Promise.race([cyclePromise.catch(() => {}), sleepMs(1800)]);
+          }
           if (this.bot?.inventory) {
             await this._syncWindowSafe(this.bot.inventory, 250);
             if (typeof this.bot.clickWindow === 'function') {
@@ -667,7 +720,7 @@ class AutonomousProgressionEngine extends EventEmitter {
             }
           }
         } finally {
-          if (watchdogTimer) clearTimeout(watchdogTimer);
+          if (watchdogInterval) clearInterval(watchdogInterval);
           this._loopBusy = false;
         }
       }
@@ -1077,33 +1130,241 @@ class AutonomousProgressionEngine extends EventEmitter {
     if (scaled > 0) await sleepMs(scaled);
   }
 
-  async _safeGotoNear(pos, range = 2, timeoutMs = 15000) {
+  _isProtectedStationBlock(block) {
+    if (!block?.position) return false;
+    const n = String(block.name || '').toLowerCase();
+    if (
+      n === 'crafting_table' ||
+      n === 'furnace' ||
+      n === 'blast_furnace' ||
+      n === 'smoker' ||
+      n === 'chest' ||
+      n.includes('boiler') ||
+      n.includes('machine') ||
+      n.includes('casing') ||
+      n.includes('hatch') ||
+      n.includes('bus') ||
+      n.includes('firebrick')
+    ) {
+      return true;
+    }
+    const p = block.position;
+    for (const val of Object.values(this.worldState.stations || {})) {
+      if (!val) continue;
+      if (Array.isArray(val)) {
+        if (val.some((c) => c && c.x === p.x && c.y === p.y && c.z === p.z)) return true;
+      } else if (typeof val.x === 'number') {
+        if (val.x === p.x && val.y === p.y && val.z === p.z) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Self-unstick maneuver when `mineflayer-pathfinder` gets caught on overhanging leaves,
+   * modded surface rocks/bushes, corners, or 2-block pits — frees the bot without human help!
+   */
+  async _performPhysicalUnstick(goalPos) {
+    if (!this.bot?.entity?.position) return;
+    this.touchActivity();
+    const pos = this.bot.entity.position.floored();
+    const dx = goalPos ? Math.sign(Math.floor(goalPos.x) - pos.x) : 1;
+    const dz = goalPos ? Math.sign(Math.floor(goalPos.z) - pos.z) : 0;
+    const stepX = dx !== 0 ? dx : 1;
+    const stepZ = dx === 0 && dz !== 0 ? dz : 0;
+
+    if (typeof this.bot.blockAt === 'function') {
+      // 1. Clear low ceiling / overhanging leaves at (0, 2, 0) that block jumping
+      const overhead = this.bot.blockAt(pos.offset(0, 2, 0));
+      if (
+        typeof this.bot.dig === 'function' &&
+        overhead &&
+        overhead.type !== 0 &&
+        overhead.name !== 'air' &&
+        !this._isWaterBlockName(overhead.name) &&
+        !this._isProtectedStationBlock(overhead) &&
+        (!this._blockRequiresPickaxe(overhead) || this.findInventoryItem('#pickaxe'))
+      ) {
+        await this.equipBestToolForBlock(overhead);
+        try {
+          await this.bot.dig(overhead, true);
+        } catch (_) {
+          // Ignore
+        }
+      }
+
+      // 2. Check if trapped in a 2-block-deep hole/pit (all 4 cardinal walls >= 2 blocks high)
+      const dirs = [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1]
+      ];
+      const trappedInPit = dirs.every(([ox, oz]) => {
+        const b0 = this.bot.blockAt(pos.offset(ox, 0, oz));
+        const b1 = this.bot.blockAt(pos.offset(ox, 1, oz));
+        return b0?.boundingBox === 'block' && b1?.boundingBox === 'block';
+      });
+
+      if (trappedInPit) {
+        const scaf = this.findInventoryItem(['minecraft:dirt', '#cobblestone', '#planks']);
+        const below = this.bot.blockAt(pos.offset(0, -1, 0));
+        if (
+          scaf &&
+          below?.boundingBox === 'block' &&
+          typeof this.bot.setControlState === 'function' &&
+          typeof this.bot.placeBlock === 'function'
+        ) {
+          await this.equipItemSpec(this.registryBridge.toCanonicalItemId(scaf), 'hand');
+          this.bot.setControlState('jump', true);
+          await this._delay(240);
+          try {
+            await this.bot.placeBlock(below, new Vec3(0, 1, 0));
+          } catch (_) {
+            // Fall through to stair carving
+          }
+          this.bot.setControlState('jump', false);
+          return;
+        }
+
+        // Carve a 2-high step out of the pit wall toward goalPos
+        for (const [oy] of [[1], [2], [0]]) {
+          const wall = this.bot.blockAt(pos.offset(stepX, oy, stepZ));
+          if (
+            wall &&
+            wall.type !== 0 &&
+            wall.name !== 'air' &&
+            !this._isProtectedStationBlock(wall) &&
+            (!this._blockRequiresPickaxe(wall) || this.findInventoryItem('#pickaxe'))
+          ) {
+            await this.equipBestToolForBlock(wall);
+            try {
+              await this.bot.dig(wall, true);
+            } catch (_) {
+              // Ignore
+            }
+          }
+        }
+        return;
+      }
+
+      // 3. Clear face-level leaves / bushes / non-station obstacle in movement direction
+      const frontHead = this.bot.blockAt(pos.offset(stepX, 1, stepZ));
+      if (
+        frontHead &&
+        frontHead.type !== 0 &&
+        frontHead.name !== 'air' &&
+        !this._isWaterBlockName(frontHead.name) &&
+        !this._isProtectedStationBlock(frontHead) &&
+        (String(frontHead.name).includes('leaves') ||
+          String(frontHead.name).includes('vine') ||
+          frontHead.stateId > this.vanillaMaxStateId ||
+          !this._blockRequiresPickaxe(frontHead))
+      ) {
+        if (!this._blockRequiresPickaxe(frontHead) || this.findInventoryItem('#pickaxe')) {
+          await this.equipBestToolForBlock(frontHead);
+          try {
+            await this.bot.dig(frontHead, true);
+          } catch (_) {
+            // Ignore
+          }
+        }
+      }
+    }
+
+    // 4. Quick lateral sidestep + hop to clear fence/corner/modded-rock collision boxes
+    if (typeof this.bot.setControlState === 'function') {
+      const side = Math.random() < 0.5 ? 'left' : 'right';
+      this.bot.setControlState(side, true);
+      this.bot.setControlState('jump', true);
+      await this._delay(220);
+      this.bot.setControlState(side, false);
+      this.bot.setControlState('jump', false);
+    }
+  }
+
+  async _safeGotoNear(pos, range = 2, timeoutMs = 15000, options = {}) {
+    const cycleId = this._activeCycleId;
+    if (this._isCycleAborted(cycleId)) return false;
     if (!this.bot?.pathfinder?.goto) return true;
     if (this.navigator && !this.navigator._initialized) {
       this.navigator.configureMovements();
     }
-    let timeoutHandle = null;
-    try {
-      const p = pos instanceof Vec3 ? pos : new Vec3(pos.x, pos.y, pos.z);
-      if (this.bot.entity?.position && this.bot.entity.position.distanceTo(p) <= range + 0.6) {
-        return true;
+
+    const p = pos instanceof Vec3 ? pos : new Vec3(pos.x, pos.y, pos.z);
+    const checkReached = () => {
+      const cur = this.bot.entity?.position;
+      if (!cur) return false;
+      if (options.horizontalOnly) {
+        return Math.hypot(cur.x - p.x, cur.z - p.z) <= range + 0.8;
       }
-      const goal = new goals.GoalNear(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z), range);
+      return cur.distanceTo(p) <= range + 0.6;
+    };
+
+    if (checkReached()) {
+      this.touchActivity();
+      return true;
+    }
+
+    const makeGoal = (useXZ) =>
+      useXZ && goals.GoalNearXZ
+        ? new goals.GoalNearXZ(Math.floor(p.x), Math.floor(p.z), range)
+        : new goals.GoalNear(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z), range);
+
+    let timeoutHandle = null;
+    let progressMonitor = null;
+    try {
+      let lastPos = this.bot.entity?.position ? this.bot.entity.position.clone() : null;
+      let stalledTicks = 0;
+
+      if (this.bot._client && this.actionDelayScale > 0) {
+        progressMonitor = setInterval(() => {
+          const cur = this.bot.entity?.position;
+          if (!cur || !lastPos) return;
+          const moved = cur.distanceTo(lastPos);
+          if (moved > 0.35 || this.bot.targetDigBlock) {
+            this.touchActivity();
+            lastPos = cur.clone();
+            stalledTicks = 0;
+          } else {
+            stalledTicks++;
+          }
+        }, 1500);
+        progressMonitor.unref?.();
+      }
+
       await Promise.race([
-        this.bot.pathfinder.goto(goal),
+        this.bot.pathfinder.goto(makeGoal(Boolean(options.horizontalOnly))),
         new Promise((_, reject) => {
           timeoutHandle = setTimeout(() => {
-            this.bot.pathfinder.setGoal(null);
+            try {
+              this.bot.pathfinder.setGoal(null);
+            } catch (_) {
+              // Ignore
+            }
             reject(new Error('Pathfind timeout'));
           }, timeoutMs);
           timeoutHandle.unref?.();
         })
       ]);
+      this.touchActivity();
       return true;
     } catch (_) {
+      if (this._isCycleAborted(cycleId)) return false;
+      if (checkReached()) return true;
+
+      // Automatic self-unstick + 1 fast retry with GoalNearXZ if blocked on uneven terrain!
+      if (this.bot._client && !options._retriedUnstick) {
+        await this._performPhysicalUnstick(p);
+        return this._safeGotoNear(p, range, Math.min(6000, timeoutMs), {
+          horizontalOnly: Boolean(options.horizontalOnly || Math.abs((this.bot.entity?.position?.y ?? p.y) - p.y) <= 4),
+          _retriedUnstick: true
+        });
+      }
       return false;
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (progressMonitor) clearInterval(progressMonitor);
     }
   }
 
@@ -1452,8 +1713,10 @@ class AutonomousProgressionEngine extends EventEmitter {
     const targetZ = Math.round(base.z + Math.sin(angle) * radius);
     const targetY = this.bot?.entity?.position ? Math.round(this.bot.entity.position.y) : base.y;
 
-    this._log('info', `Exploring outward to (${targetX}, ${targetY}, ${targetZ}) to load fresh chunks...`);
-    await this._safeGotoNear(new Vec3(targetX, targetY, targetZ), 4, 14000);
+    this._log('info', `Exploring outward to (${targetX}, *, ${targetZ}) over surface terrain to load fresh chunks...`);
+    await this._safeGotoNear(new Vec3(targetX, targetY, targetZ), 4, 14000, {
+      horizontalOnly: true
+    });
     this._saveWorldState();
   }
 
@@ -2190,16 +2453,22 @@ class AutonomousProgressionEngine extends EventEmitter {
         const before = this.countInventory(fullId);
         await this.craftShapedLive(shaped, count);
         if (this.countInventory(fullId) > before) return true;
-        // Never fall through to Mineflayer's `bot.craft` on a live 1.20.1 server: `craft.js`
-        // mutates `window.updateSlot(0, item)` client-side and calls `putAway(0)`, desyncing slots!
         if (this.bot.inventory) {
           await this._syncWindowSafe(this.bot.inventory, 200);
         }
         return false;
       }
+
+      // Universal fallback: look up ANY of the 750+ Vanilla 1.20.1 / GTL / GTCEu crafting recipes!
+      if (await this.craftFromUniversalRegistryLive(fullId, count)) {
+        return true;
+      }
+      return false;
     }
 
-    if (!this.bot?.recipesFor || !this.bot?.craft) return false;
+    if (!this.bot?.recipesFor || !this.bot?.craft) {
+      return this.craftFromUniversalRegistryLive(fullId, count);
+    }
     const entry = this.bot.registry?.itemsByName?.[clean];
     if (!entry) return false;
 
@@ -2347,37 +2616,225 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Ensures sufficient furnace fuel (`coal`/`lignite` first, or bulk-converts `1 log -> 4 planks`
-   * for 4x smelting efficiency under GTL's `harderCharcoalRecipe: true`).
+   * Crafts ANY item registered in `UniversalRecipeRegistry` (750+ Vanilla 1.20.1, GTCEu, KubeJS,
+   * and live `declare_recipes` shaped & shapeless recipes) whose ingredients are in inventory!
    */
-  async ensureFurnaceFuel(minFuelItems = 6) {
-    if (this.countInventory('#furnace_fuel') >= minFuelItems) return true;
+  async craftFromUniversalRegistryLive(targetItemId, targetOutputCount = 1) {
+    if (!this.recipeRegistry || !this.bot?.clickWindow) return false;
+    const outId = normalizeItemId(targetItemId);
+    const candidates = this.recipeRegistry.getCraftingRecipesForOutput(outId);
+    if (!candidates || candidates.length === 0) return false;
+
+    const hasTable = Boolean(
+      this._sharedTableWindow || this.getValidStationBlock('craftingTable', 'crafting_table')
+    );
+
+    for (const r of candidates) {
+      if (r.requiresTable && !hasTable) continue;
+      const batches = Math.max(1, Math.ceil(targetOutputCount / (r.outputCount || 1)));
+
+      // Count needed ingredients across `r.gridRows`
+      const reqCounts = new Map();
+      for (const row of r.gridRows) {
+        for (const spec of row) {
+          if (!spec) continue;
+          const k = Array.isArray(spec) ? spec.join('|') : String(spec);
+          const cur = reqCounts.get(k) || { spec, count: 0 };
+          cur.count += String(spec).startsWith('#gtceu:') ? 1 : batches;
+          reqCounts.set(k, cur);
+        }
+      }
+
+      let canAfford = true;
+      for (const { spec, count } of reqCounts.values()) {
+        if (this.countInventory(spec) < count) {
+          canAfford = false;
+          break;
+        }
+      }
+      if (!canAfford) continue;
+
+      const before = this.countInventory(outId);
+      const ok = await this.craftShapedLive(r.gridRows, batches);
+      if (ok || this.countInventory(outId) > before) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async craftAnyItemLive(targetItemId, count = 1) {
+    const id = normalizeItemId(targetItemId);
+    if (id.startsWith('minecraft:')) {
+      return this.craftVanillaItem(id.slice('minecraft:'.length), count, true);
+    }
+    return this.craftFromUniversalRegistryLive(id, count);
+  }
+
+  /**
+   * Selects the highest-density REAL burnable fuel in inventory (`coke` > `coal` > `lignite` > `planks` > `stick`),
+   * strictly excluding unsmelted raw ores (`gtceu:raw_coal`, `gtceu:raw_lignite_coal`, `*_ore`).
+   */
+  findBestFurnaceFuelItem() {
+    let best = null;
+    let bestCap = 0;
+    for (const item of this.getInventoryItems()) {
+      const id = this.registryBridge.toCanonicalItemId(item);
+      const cap = this.recipeRegistry.getFuelSmeltCapacity(id);
+      if (cap > bestCap) {
+        bestCap = cap;
+        best = item;
+      }
+    }
+    return best;
+  }
+
+  getTotalFuelSmeltCapacity() {
+    let total = 0;
+    for (const item of this.getInventoryItems()) {
+      const id = this.registryBridge.toCanonicalItemId(item);
+      const cap = this.recipeRegistry.getFuelSmeltCapacity(id);
+      if (cap > 0) {
+        total += cap * (item.count ?? 1);
+      }
+    }
+    return total;
+  }
+
+  _computeFuelUnitsNeeded(fuelItem, batchCount, isFastBlast) {
+    if (!fuelItem) return 0;
+    const avail = fuelItem.count || 1;
+    if (isFastBlast) {
+      // In GTL, 1-tick Blast Furnace cooks 20 items/sec — 1 plank (`300t`) blasts up to 300 items!
+      return 1;
+    }
+    const id = this.registryBridge.toCanonicalItemId(fuelItem);
+    const cap = this.recipeRegistry.getFuelSmeltCapacity(id) || 1;
+    const rawUnits = Math.ceil(batchCount / cap);
+    // Add +1 plank buffer for short-burning wood fuels (`cap <= 2`) so partial tick rounding NEVER
+    // leaves the last item unsmelted inside a cold furnace!
+    const safeUnits = cap <= 2 && batchCount >= 2 ? rawUnits + 1 : rawUnits;
+    return Math.min(avail, Math.max(1, safeUnits));
+  }
+
+  /**
+   * Ensures sufficient real burnable furnace fuel (`minSmeltCapacity` smelts):
+   *  - Automatically recognizes `gtceu:raw_coal` / `gtceu:raw_lignite_coal` and smelts them into
+   *    `2x minecraft:coal` / `2x gtceu:lignite_gem` (`16` smelts of fuel per raw coal!) first!
+   *  - Otherwise converts `1 log -> 4 planks` (`6` smelts per log) under GTL's `harderCharcoalRecipe: true`.
+   */
+  async ensureFurnaceFuel(minSmeltCapacity = 6) {
+    // 1. If we are carrying unsmelted `gtceu:raw_coal` / `gtceu:raw_lignite_coal`, convert it into
+    //    real `minecraft:coal` / `gtceu:lignite_gem` (`2x` output = `16` smelts per raw coal!)
+    if (
+      !this._inFuelBootstrap &&
+      this.countInventory('#raw_coal') > 0 &&
+      (this.getValidStationBlock('blastFurnace', 'blast_furnace') ||
+        this.getValidStationBlock('furnace', 'furnace'))
+    ) {
+      this._inFuelBootstrap = true;
+      try {
+        if (this.getTotalFuelSmeltCapacity() < 1.5) {
+          if (this.countInventory('#logs') > 0) {
+            await this.craftLogsToPlanksFast(2);
+          } else {
+            await this.gatherWood(2, false);
+            await this.craftLogsToPlanksFast(2);
+          }
+        }
+        if (this.getTotalFuelSmeltCapacity() >= 1.5) {
+          const rawQty = Math.min(8, this.countInventory('#raw_coal'));
+          this._log(
+            'info',
+            `Smelting ${rawQty}x raw coal into ${rawQty * 2}x burnable coal...`
+          );
+          await this.smeltItemsLive('#raw_coal', rawQty, true);
+        }
+      } finally {
+        this._inFuelBootstrap = false;
+      }
+    }
+
+    if (this.getTotalFuelSmeltCapacity() >= minSmeltCapacity) return true;
 
     if (this.countInventory('#logs') > 0) {
-      await this.craftLogsToPlanksFast(Math.max(2, Math.ceil(minFuelItems / 4)));
-      if (this.countInventory('#furnace_fuel') >= minFuelItems) return true;
+      await this.craftLogsToPlanksFast(Math.max(2, Math.ceil(minSmeltCapacity / 6)));
+      if (this.getTotalFuelSmeltCapacity() >= minSmeltCapacity) return true;
     }
 
     const coalScan = this.scanChunkMemoryForGtceuVeins('coal');
     if (coalScan.knownMatches.length > 0) {
-      await this.prospectAndMineOre('coal', minFuelItems);
+      await this.prospectAndMineOre('coal', Math.max(3, Math.ceil(minSmeltCapacity / 8)));
+      // Immediately refine newly mined `gtceu:raw_coal` into `minecraft:coal` if needed!
+      if (!this._inFuelBootstrap && this.countInventory('#raw_coal') > 0) {
+        return this.ensureFurnaceFuel(minSmeltCapacity);
+      }
     } else {
       await this.gatherWood(4, false);
       await this.craftLogsToPlanksFast(4);
     }
-    return this.countInventory('#furnace_fuel') >= minFuelItems;
+    return this.getTotalFuelSmeltCapacity() >= minSmeltCapacity;
   }
 
   /**
-   * High-speed smelter:
-   *  - Uses Base Camp's 1-Tick `minecraft:blast_furnace` (`0.05s/item` in GTL!) whenever available,
-   *  - Before `blast_furnace` is unlocked, automatically splits batches across BOTH parallel
-   *    Base Camp Furnaces (`furnace` + `furnaceAux`) simultaneously — cutting smelt wait time in HALF!
+   * Resolves and executes a 1-step or 2-step smelting/blasting chain to produce `targetOutputId`
+   * (e.g. `gtceu:raw_coal -> 2x minecraft:coal`, `cobblestone -> stone -> smooth_stone`,
+   * `clay_ball -> brick`, `sand -> glass`, `iron_ingot -> wrought_iron_ingot`)!
+   */
+  async smeltToProduceLive(targetOutputId, targetCount = 1) {
+    const outId = normalizeItemId(targetOutputId);
+    const chain = this.recipeRegistry.resolveSmeltingChainForOutput(
+      outId,
+      targetCount,
+      (itemId) => this.countInventory(itemId)
+    );
+    if (!chain || chain.length === 0) return false;
+
+    const t0 = Date.now();
+    const ok1 = await this.smeltItemsLive(
+      chain[0].inputId,
+      chain[0].inputCount,
+      Boolean(chain[0].recipe?.canBlast)
+    );
+    if (!ok1) return false;
+
+    // If a 2-stage smelt (`cobblestone -> stone -> smooth_stone`) finished Stage 1 quickly (<18s),
+    // immediately chain Stage 2 without wasting a cycle; otherwise yield cleanly!
+    if (chain.length > 1 && Date.now() - t0 < 18000 && this.countInventory(chain[1].inputId) > 0) {
+      await this.smeltItemsLive(
+        chain[1].inputId,
+        Math.min(chain[1].inputCount, this.countInventory(chain[1].inputId)),
+        Boolean(chain[1].recipe?.canBlast)
+      );
+    }
+    return this.countInventory(outId) > 0;
+  }
+
+  /**
+   * High-speed recipe-aware smelter:
+   *  - Consults `UniversalRecipeRegistry` so `canBlast: false` items (`cobblestone -> stone`,
+   *    `stone -> smooth_stone`, raw food) NEVER get put into `minecraft:blast_furnace`!
+   *  - Uses Base Camp's 1-Tick `minecraft:blast_furnace` (`0.05s/item` in GTL!) for all blastable items,
+   *  - Splits larger non-blast batches across BOTH parallel Base Camp Furnaces (`furnace` + `furnaceAux`)!
    */
   async smeltItemsLive(inputSpec, count = 4, preferBlastFurnace = true) {
     if (typeof this.bot?.openFurnace !== 'function') return false;
 
-    const blastBlock = preferBlastFurnace
+    const inputItem = this.findInventoryItem(inputSpec);
+    if (!inputItem) return false;
+
+    const inputCanonicalId = this.registryBridge.toCanonicalItemId(inputItem);
+    const blastRecipe = this.recipeRegistry.getSmeltingRecipeForInput(
+      inputCanonicalId,
+      'blast_furnace'
+    );
+    const furnaceRecipe = this.recipeRegistry.getSmeltingRecipeForInput(
+      inputCanonicalId,
+      'furnace'
+    );
+
+    const allowBlast = Boolean(preferBlastFurnace && blastRecipe?.canBlast);
+    const blastBlock = allowBlast
       ? this.getValidStationBlock('blastFurnace', 'blast_furnace')
       : null;
 
@@ -2385,32 +2842,42 @@ class AutonomousProgressionEngine extends EventEmitter {
       return this._smeltInSingleFurnace(blastBlock, inputSpec, count, true);
     }
 
+    if (!furnaceRecipe && blastRecipe && !blastRecipe.canSmelt) {
+      // Blast-only recipe (e.g. `compressed_coke_clay -> coke_oven_brick`) without a Blast Furnace yet
+      return false;
+    }
+
     const f1 = this.getValidStationBlock('furnace', 'furnace');
     const f2 = this.getValidStationBlock('furnaceAux', 'furnace');
     if (!f1) return false;
 
-    const inputItem = this.findInventoryItem(inputSpec);
-    if (!inputItem) return false;
-    const totalBatch = Math.min(count, inputItem.count || 1);
+    // Cap pre-Blast-Furnace normal 200-tick smelt batches per step (furnace updates refresh touchActivity())
+    const maxSafeBatch = f2 && !f2.position.equals(f1.position) ? Math.min(count, 10) : Math.min(count, 6);
+    const totalBatch = Math.min(maxSafeBatch, inputItem.count || 1);
+
+    if (this.getTotalFuelSmeltCapacity() < totalBatch + 1) {
+      await this.ensureFurnaceFuel(totalBatch + 2);
+    }
 
     // Parallel dual-furnace split when 2 distinct furnaces exist and batch >= 4!
     if (
       f2 &&
       !f2.position.equals(f1.position) &&
       totalBatch >= 4 &&
-      this.countInventory('#furnace_fuel') >= 4
+      this.getTotalFuelSmeltCapacity() >= totalBatch
     ) {
       const half1 = Math.ceil(totalBatch / 2);
       const half2 = totalBatch - half1;
       await this._safeGotoNear(f1.position, 2, 8000);
-      const handle1 = await this._loadFurnaceNoWait(f1, inputSpec, half1);
+      const handle1 = await this._loadFurnaceNoWait(f1, inputSpec, half1, false);
       // On real Minecraft servers, opening f2 closes f1's GUI while f1 keeps burning on the server!
       if (this.bot?._client && handle1) {
         handle1.close();
       }
-      const handle2 = await this._loadFurnaceNoWait(f2, inputSpec, half2);
+      await this._safeGotoNear(f2.position, 2, 8000);
+      const handle2 = await this._loadFurnaceNoWait(f2, inputSpec, half2, false);
 
-      const maxWaitMs = half1 * 10400 + 800;
+      const maxWaitMs = half1 * 10500 + 1200;
       if (handle2) {
         await this._waitForFurnaceBatch(handle2, half2, maxWaitMs);
         await this._unloadFurnaceHandle(handle2);
@@ -2419,7 +2886,8 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (this.bot?._client) {
         await this._safeGotoNear(f1.position, 2, 6000);
         const reopen1 = await this.bot.openFurnace(f1);
-        await this._waitForFurnaceBatch(reopen1, half1, 3500);
+        guardWindowSlot0Listeners(reopen1, this.slot0TimeoutMs);
+        await this._waitForFurnaceBatch(reopen1, half1, 11500);
         await this._unloadFurnaceHandle(reopen1);
       } else {
         await this._unloadFurnaceHandle(handle1);
@@ -2431,19 +2899,33 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Event-driven furnace completion listener: resolves the INSTANT all inputs finish smelting
-   * (`!furnace.inputItem()`) or `outputItem().count >= expectedCount`, rather than sleeping blindly!
+   * Event-driven furnace completion listener:
+   *  - Refreshes `touchActivity()` on every furnace progress update so active smelting NEVER triggers
+   *    the stall watchdog!
+   *  - Resolves the INSTANT all inputs finish smelting (`!furnace.inputItem()`) OR if the furnace
+   *    flame goes completely cold with zero fuel remaining!
    */
   async _waitForFurnaceBatch(furnace, expectedCount, maxWaitMs) {
     if (!furnace) return;
-    const isFinished = () => {
+    const cycleId = this._activeCycleId;
+    let sawActiveBurn = false;
+
+    const isFinishedOrCold = () => {
+      if (this._isCycleAborted(cycleId)) return true;
       const inp = furnace.inputItem?.();
       const out = furnace.outputItem?.();
       if (!inp && out) return true;
+      if (!inp) return true;
       if ((out?.count ?? 0) >= expectedCount) return true;
+      if ((furnace.fuel ?? 0) > 0 || (furnace.progress ?? 0) > 0) {
+        sawActiveBurn = true;
+      } else if (sawActiveBurn && !furnace.fuelItem?.()) {
+        // Flame went out and fuel slot is empty — stop waiting immediately so caller can top up or unload!
+        return true;
+      }
       return false;
     };
-    if (isFinished()) return;
+    if (isFinishedOrCold()) return;
 
     const scaledMax = Math.max(0, Math.round(maxWaitMs * this.actionDelayScale));
     if (scaledMax === 0) return;
@@ -2452,7 +2934,8 @@ class AutonomousProgressionEngine extends EventEmitter {
       await new Promise((resolve) => {
         let timer = null;
         const check = () => {
-          if (isFinished()) {
+          this.touchActivity();
+          if (isFinishedOrCold()) {
             cleanup();
             resolve();
           }
@@ -2476,21 +2959,33 @@ class AutonomousProgressionEngine extends EventEmitter {
     await sleepMs(scaledMax);
   }
 
-  async _loadFurnaceNoWait(furnaceBlock, inputSpec, batchCount) {
+  async _loadFurnaceNoWait(furnaceBlock, inputSpec, batchCount, isFastBlast = false) {
     const inputItem = this.findInventoryItem(inputSpec);
-    const fuelItem = this.findInventoryItem('#furnace_fuel');
+    const fuelItem = this.findBestFurnaceFuelItem();
     if (!inputItem || !fuelItem || batchCount <= 0) return null;
 
     const furnace = await this.bot.openFurnace(furnaceBlock);
-    if (!furnace.fuelItem()) {
-      const fuelQty = Math.min(fuelItem.count || 1, Math.max(1, Math.ceil(batchCount / 2)));
-      await furnace.putFuel(fuelItem.type, null, fuelQty);
-    }
+    guardWindowSlot0Listeners(furnace, this.slot0TimeoutMs);
+    this.touchActivity();
+
     if (furnace.outputItem()) {
       await furnace.takeOutput();
     }
-    const qty = Math.min(batchCount, inputItem.count || 1);
-    await furnace.putInput(inputItem.type, null, qty);
+    if (furnace.inputItem()) {
+      const curInId = this.registryBridge.toCanonicalItemId(furnace.inputItem());
+      if (!matchesItemSpec(curInId, inputSpec)) {
+        await furnace.takeInput();
+      }
+    }
+    if (!furnace.fuelItem()) {
+      const fuelQty = this._computeFuelUnitsNeeded(fuelItem, batchCount, isFastBlast);
+      await furnace.putFuel(fuelItem.type, null, fuelQty);
+    }
+    const freshIn = this.findInventoryItem(inputSpec);
+    if (freshIn) {
+      const qty = Math.min(batchCount, freshIn.count || 1);
+      await furnace.putInput(freshIn.type, null, qty);
+    }
     return furnace;
   }
 
@@ -2501,6 +2996,9 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (furnace.inputItem()) await furnace.takeInput();
     } finally {
       furnace.close();
+      if (this.bot?.inventory) {
+        await this._syncWindowSafe(this.bot.inventory, 400);
+      }
     }
   }
 
@@ -2508,30 +3006,66 @@ class AutonomousProgressionEngine extends EventEmitter {
     const inputItem = this.findInventoryItem(inputSpec);
     if (!inputItem) return false;
 
-    if (this.countInventory('#furnace_fuel') === 0) {
-      await this.ensureFurnaceFuel(4);
+    const neededSmeltCap = isFastBlast ? 1.5 : Math.max(3, count + 1);
+    if (this.getTotalFuelSmeltCapacity() < neededSmeltCap) {
+      await this.ensureFurnaceFuel(neededSmeltCap);
     }
-    const fuelItem = this.findInventoryItem('#furnace_fuel');
+    const fuelItem = this.findBestFurnaceFuelItem();
     if (!fuelItem) return false;
 
     const batchCount = Math.min(count, inputItem.count || 1);
+    const expectedOutPerIn =
+      this.recipeRegistry.getSmeltingRecipeForInput(
+        this.registryBridge.toCanonicalItemId(inputItem),
+        isFastBlast ? 'blast_furnace' : 'furnace'
+      )?.outputCount || 1;
+
     await this._safeGotoNear(furnaceBlock.position, 2, 8000);
     const furnace = await this.bot.openFurnace(furnaceBlock);
+    guardWindowSlot0Listeners(furnace, this.slot0TimeoutMs);
+    this.touchActivity();
 
     try {
-      if (!furnace.fuelItem()) {
-        const fuelQty = Math.min(fuelItem.count || 1, Math.max(1, Math.ceil(batchCount / 2)));
-        await furnace.putFuel(fuelItem.type, null, fuelQty);
-      }
       if (furnace.outputItem()) {
         await furnace.takeOutput();
       }
-      await furnace.putInput(inputItem.type, null, batchCount);
+      if (furnace.inputItem()) {
+        const curInId = this.registryBridge.toCanonicalItemId(furnace.inputItem());
+        if (!matchesItemSpec(curInId, inputSpec)) {
+          await furnace.takeInput();
+        }
+      }
+      if (!furnace.fuelItem()) {
+        const freshFuel = this.findBestFurnaceFuelItem();
+        if (freshFuel) {
+          const fuelQty = this._computeFuelUnitsNeeded(freshFuel, batchCount, isFastBlast);
+          await furnace.putFuel(freshFuel.type, null, fuelQty);
+        }
+      }
+      const freshInput = this.findInventoryItem(inputSpec);
+      if (freshInput) {
+        const putQty = Math.min(batchCount, freshInput.count || 1);
+        await furnace.putInput(freshInput.type, null, putQty);
+      }
 
       const maxWaitMs = isFastBlast
-        ? Math.min(2500, 150 + batchCount * 100)
-        : batchCount * 10400 + 800;
-      await this._waitForFurnaceBatch(furnace, batchCount, maxWaitMs);
+        ? Math.min(2500, 180 + batchCount * 110)
+        : batchCount * 10500 + 1200;
+      await this._waitForFurnaceBatch(furnace, batchCount * expectedOutPerIn, maxWaitMs);
+
+      // If fuel ran out with 1 item still inside, top up 1 more fuel unit if available!
+      if (!isFastBlast && furnace.inputItem() && !furnace.fuelItem()) {
+        const extraFuel = this.findBestFurnaceFuelItem();
+        if (extraFuel) {
+          await furnace.putFuel(extraFuel.type, null, 1);
+          const remCount = furnace.inputItem()?.count || 1;
+          await this._waitForFurnaceBatch(
+            furnace,
+            (furnace.outputItem()?.count || 0) + remCount * expectedOutPerIn,
+            remCount * 10500 + 800
+          );
+        }
+      }
 
       if (furnace.outputItem()) {
         await furnace.takeOutput();
@@ -2542,6 +3076,9 @@ class AutonomousProgressionEngine extends EventEmitter {
       return true;
     } finally {
       furnace.close();
+      if (this.bot?.inventory) {
+        await this._syncWindowSafe(this.bot.inventory, 400);
+      }
     }
   }
 
@@ -2737,23 +3274,35 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (!hasBlastFurnace) {
         if (this.countInventory('minecraft:blast_furnace') === 0) {
           if (this.countInventory('minecraft:iron_ingot') < 5) {
-            if (this.countInventory('#ore:iron') < 5 - this.countInventory('minecraft:iron_ingot')) {
+            const ironDeficit = 5 - this.countInventory('minecraft:iron_ingot');
+            if (this.countInventory('#ore:iron') < ironDeficit) {
               await this.prospectAndMineOre('iron', 12);
               return { stage: this._currentMilestoneId };
             }
-            await this.smeltItemsLive('#ore:iron', 6, false);
+            this._log(
+              'info',
+              `Smelting first ${ironDeficit} Iron Ingot(s) to unlock GTL 1-Tick Blast Furnace...`
+            );
+            await this.smeltItemsLive('#ore:iron', ironDeficit, false);
+            if (this.countInventory('minecraft:iron_ingot') < 5) {
+              return { stage: this._currentMilestoneId };
+            }
           }
 
           if (this.countInventory('minecraft:smooth_stone') < 3) {
-            if (this.countInventory('minecraft:stone') < 3) {
-              if (this.countInventory('minecraft:cobblestone') < 3) {
-                await this.gatherSurfaceBlocks(['stone', 'cobblestone'], '#cobblestone', 6);
-                return { stage: this._currentMilestoneId };
-              }
-              await this.smeltItemsLive('minecraft:cobblestone', 3, false);
+            const smoothDeficit = 3 - this.countInventory('minecraft:smooth_stone');
+            const stoneHave = this.countInventory('minecraft:stone');
+            if (stoneHave < smoothDeficit && this.countInventory('minecraft:cobblestone') < smoothDeficit - stoneHave) {
+              await this.gatherSurfaceBlocks(['stone', 'cobblestone'], '#cobblestone', 6);
+              return { stage: this._currentMilestoneId };
             }
-            if (this.countInventory('minecraft:stone') >= 3) {
-              await this.smeltItemsLive('minecraft:stone', 3, false);
+            this._log(
+              'info',
+              `Smelting ${stoneHave >= smoothDeficit ? 'stone -> smooth_stone' : 'cobblestone -> stone'} (${this.countInventory('minecraft:smooth_stone')}/3 smooth_stone) for GTL 1-Tick Blast Furnace...`
+            );
+            await this.smeltToProduceLive('minecraft:smooth_stone', smoothDeficit);
+            if (this.countInventory('minecraft:smooth_stone') < 3) {
+              return { stage: this._currentMilestoneId };
             }
           }
 
@@ -3196,6 +3745,15 @@ class AutonomousProgressionEngine extends EventEmitter {
             ? this.hazardMonitor.canExecuteRecipeStep(step)
             : { allowed: true };
           if (!verdict.allowed) break;
+          const neededOut = step.outputs?.[0]?.count || 1;
+          if (step.machine === 'furnace' && this.countInventory(step.outputItemId) < neededOut) {
+            await this.smeltToProduceLive(step.outputItemId, neededOut);
+            break;
+          }
+          if (step.machine === 'crafting_table' && this.countInventory(step.outputItemId) < neededOut) {
+            await this.craftAnyItemLive(step.outputItemId, neededOut);
+            break;
+          }
           if (this.bot?.currentWindow) {
             await this.craftingEngine.containerController.executeMachineStep(step, {
               hazardMonitor: this.hazardMonitor
@@ -3253,6 +3811,14 @@ class AutonomousProgressionEngine extends EventEmitter {
           return false;
         }
       } else if (ORE_CATEGORY_MATCHERS.coal(rawId)) {
+        if (rawId === 'minecraft:coal' && this.countTotalStock('minecraft:coal') < neededQty) {
+          if (this.countInventory('#raw_coal') > 0) {
+            await this.smeltItemsLive('#raw_coal', Math.ceil(neededQty / 2), true);
+            return false;
+          }
+          await this.prospectAndMineOre('coal', Math.ceil(neededQty / 2));
+          return false;
+        }
         if (this.countTotalStock('#ore:coal') < neededQty) {
           await this.prospectAndMineOre('coal', neededQty);
           return false;

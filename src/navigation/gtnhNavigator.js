@@ -289,9 +289,9 @@ class GTNHNavigator extends EventEmitter {
     moves.infiniteLiquidDropdownDistance = true;
     moves.dontCreateFlow = true;
     moves.dontMineUnderFallingBlock = true;
-    moves.allow1by1towers = false;
+    moves.allow1by1towers = this.options.allow1by1towers !== false;
     moves.allowSprinting = this.options.allowSprinting !== false;
-    moves.allowParkour = this.options.allowParkour !== false;
+    moves.allowParkour = Boolean(this.options.allowParkour ?? false);
     moves.canDig = Boolean(this.options.canDigInWild);
     moves.digCost = this.options.digCost ?? 1.2;
     moves.liquidCost = this.options.liquidCost ?? 2.5;
@@ -340,8 +340,27 @@ class GTNHNavigator extends EventEmitter {
       }
     }
 
-    // Allow dirt/cobblestone scaffolding so survival mining & hill climbs never get trapped in 2-block pits
-    for (const scafName of ['dirt', 'cobblestone', 'cobbled_deepslate', 'netherrack']) {
+    // Allow dirt, cobblestone, stone variants, and planks as scaffolding so survival mining &
+    // hill climbs never get trapped inside 2-block pits or underground quarries!
+    for (const scafName of [
+      'dirt',
+      'coarse_dirt',
+      'cobblestone',
+      'cobbled_deepslate',
+      'andesite',
+      'diorite',
+      'granite',
+      'tuff',
+      'netherrack',
+      'oak_planks',
+      'spruce_planks',
+      'birch_planks',
+      'jungle_planks',
+      'acacia_planks',
+      'dark_oak_planks',
+      'mangrove_planks',
+      'cherry_planks'
+    ]) {
       const itemEntry = this.bot.registry.itemsByName?.[scafName];
       if (itemEntry && !moves.scafoldingBlocks.includes(itemEntry.id)) {
         moves.scafoldingBlocks.push(itemEntry.id);

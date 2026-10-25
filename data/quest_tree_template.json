@@ -670,6 +670,110 @@
       ]
     },
     {
+      "recipeId": "rcp_coal_from_raw_coal_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 1,
+      "inputs": [
+        { "itemId": "gtceu:raw_coal", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:coal", "count": 2 }
+      ]
+    },
+    {
+      "recipeId": "rcp_lignite_from_raw_lignite_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 1,
+      "inputs": [
+        { "itemId": "gtceu:raw_lignite_coal", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gtceu:lignite_gem", "count": 2 }
+      ]
+    },
+    {
+      "recipeId": "rcp_stone_from_cobblestone_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:cobblestone", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:stone", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_smooth_stone_from_stone_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 200,
+      "inputs": [
+        { "itemId": "minecraft:stone", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "minecraft:smooth_stone", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_lead_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 1,
+      "inputs": [
+        { "itemId": "gtceu:raw_lead", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gtceu:lead_ingot", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_silver_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 1,
+      "inputs": [
+        { "itemId": "gtceu:raw_silver", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gtceu:silver_ingot", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_nickel_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 1,
+      "inputs": [
+        { "itemId": "gtceu:raw_nickel", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gtceu:nickel_ingot", "count": 1 }
+      ]
+    },
+    {
+      "recipeId": "rcp_zinc_ingot_smelt",
+      "machine": "furnace",
+      "voltageTier": "STONE",
+      "euPerTick": 0,
+      "durationTicks": 1,
+      "inputs": [
+        { "itemId": "gtceu:raw_zinc", "count": 1 }
+      ],
+      "outputs": [
+        { "itemId": "gtceu:zinc_ingot", "count": 1 }
+      ]
+    },
+    {
       "recipeId": "rcp_bronze_ingot_alloy",
       "machine": "gt_steam_machine",
       "subMachine": "lp_steam_alloy_smelter",
