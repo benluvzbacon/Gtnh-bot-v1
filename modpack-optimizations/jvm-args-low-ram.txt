@@ -1,0 +1,11 @@
+# =============================================================================
+# GregTech Leisure (1.20.1 / Java 17) Low-End PC JVM Launch Arguments
+# Paste ONE of the single-line profiles below into Prism Launcher / CurseForge
+# / Modrinth App -> Instance Settings -> Java -> JVM Arguments.
+# =============================================================================
+
+# [PROFILE A] 8 GB Total System RAM (Allocates 4.5 GB Heap — leaves ~3.5 GB for OS + iGPU)
+-Xms4096M -Xmx4608M -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=35 -XX:G1HeapRegionSize=16M -XX:+UseStringDeduplication -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -Dfml.readTimeout=180 -Dforge.logging.mojang.level=warn
+
+# [PROFILE B] 12 GB - 16 GB Total System RAM (Allocates 5.5 GB - 6.0 GB Heap — recommended for MV/HV+ AE2 bases)
+-Xms5120M -Xmx6144M -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=35 -XX:G1HeapRegionSize=32M -XX:+UseStringDeduplication -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -Dfml.readTimeout=180 -Dforge.logging.mojang.level=warn

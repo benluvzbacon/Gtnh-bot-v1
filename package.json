@@ -1,0 +1,60 @@
+{
+  "name": "gtnh-bot-v1",
+  "version": "2.0.0",
+  "description": "Low-End PC Modpack Optimizer & Headless Mineflayer 1.20.1 Automation Agent (FTB Quests DAG, GTCEu Modern GUI controller, 3D Multiblock Builder, and Volatility Monitor) trained on GregTech Leisure (GTL).",
+  "main": "src/bot.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/bot.js",
+    "probe-server": "node src/cli/probeServer.js",
+    "dry-run": "node src/bot.js --dry-run",
+    "optimize-pack": "node src/cli/optimizeModpack.js",
+    "ingest": "node src/cli/ingestData.js",
+    "ingest-data": "node src/cli/ingestData.js",
+    "plan": "node src/cli/planCraft.js",
+    "validate-blueprint": "node src/cli/validateBlueprint.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "gregtech-leisure",
+    "gtl",
+    "gtceu-modern",
+    "forge-1.20.1",
+    "low-end-pc-optimizer",
+    "dag-crafting",
+    "multiblock-builder",
+    "state-machine",
+    "headless-bot"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@dagrejs/graphlib": "^4.0.7",
+    "@tcortega/minecraft-protocol-forge": "^1.2.0",
+    "minecraft-data": "^3.117.0",
+    "minecraft-protocol": "^1.68.0",
+    "mineflayer": "^4.39.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-navigate": "^0.0.10",
+    "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-statemachine": "^1.7.0",
+    "mineflayer-tool": "^1.2.0",
+    "prismarine-block": "^1.23.0",
+    "prismarine-item": "^1.18.0",
+    "prismarine-nbt": "^2.8.0",
+    "prismarine-registry": "^1.12.0",
+    "prismarine-windows": "^2.10.0",
+    "prismarine-world": "^3.7.0",
+    "protodef": "^1.19.0",
+    "vec3": "^0.1.10"
+  },
+  "overrides": {
+    "mineflayer-statemachine": {
+      "node": "npm:empty-npm-package@1.0.0"
+    }
+  }
+}
