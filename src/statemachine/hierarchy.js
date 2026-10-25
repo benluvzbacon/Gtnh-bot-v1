@@ -71,49 +71,130 @@ function installPhysicTickDeprecationShim(bot) {
 }
 
 /**
- * Prevents two severe Mineflayer `1.20.1` `inventory.js` window-click stalls:
- *  1. `waitForWindowUpdate` awaits `once(window, 'updateSlot:0')` with NO timeout whenever clicking
- *     slots `0..4` (`minecraft:inventory`) or `0..9` (`minecraft:crafting`). On Minecraft `1.20.1`
- *     servers, any click that leaves result slot `0` unchanged (`null -> null`, e.g. placing the
- *     1st cobblestone of a pickaxe/furnace or clearing an empty cell) emits NO `set_slot(0)` packet,
- *     which hangs raw `bot.clickWindow` forever unless guarded by a bounded fallback emit.
- *  2. Clears `bot.lastDigTime` prior to window clicks so hotbar slot clicks right after chopping
+ * Guards a `prismarine-windows` `Window` instance (`bot.inventory` or `bot.currentWindow`)
+ * so ANY `once(window, 'updateSlot:0')` listener — including inside Mineflayer `inventory.js`'s
+ * private lexical `clickWindow`, `putAway(0)`, `transfer`, and `craft.js` — resolves cleanly
+ * within `slot0TimeoutMs` whenever a Minecraft `1.20.1` server omits `set_slot(0)` on `null -> null`
+ * transitions, completely eliminating `Event updateSlot:0 did not fire within timeout of 20000ms`!
+ */
+function guardWindowSlot0Listeners(window, slot0TimeoutMs = 85) {
+  if (!window || window._gtlSlot0Guarded || typeof window.emit !== 'function') return;
+  const origOnce = typeof window.once === 'function' ? window.once.bind(window) : null;
+  let inInternal = false;
+
+  const armSlot0Fallback = (event) => {
+    if (inInternal || event !== 'updateSlot:0') return;
+    let settled = false;
+    let timer = null;
+
+    const onSettled = () => {
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    if (origOnce) {
+      inInternal = true;
+      try {
+        origOnce('updateSlot:0', onSettled);
+      } finally {
+        inInternal = false;
+      }
+    }
+
+    timer = setTimeout(() => {
+      timer = null;
+      if (settled) return;
+      settled = true;
+      if (typeof window.removeListener === 'function') {
+        window.removeListener('updateSlot:0', onSettled);
+      }
+      const remaining =
+        typeof window.listenerCount === 'function' ? window.listenerCount('updateSlot:0') : 1;
+      if (remaining > 0) {
+        const cur0 = window.slots?.[0] ?? null;
+        window.emit('updateSlot:0', cur0, cur0);
+      }
+    }, slot0TimeoutMs);
+  };
+
+  for (const method of ['addListener', 'on']) {
+    if (typeof window[method] === 'function') {
+      const orig = window[method].bind(window);
+      window[method] = function wrappedSlot0Add(event, listener, ...rest) {
+        const ret = orig(event, listener, ...rest);
+        armSlot0Fallback(event);
+        return ret;
+      };
+    }
+  }
+
+  window._gtlSlot0Guarded = true;
+}
+
+/**
+ * Prevents two severe Mineflayer `1.20.1` `inventory.js` window-click stalls across BOTH public
+ * `bot.clickWindow` AND internal `inventory.js` closures (`putAway`, `transfer`, `moveSlotItem`):
+ *  1. Installs `guardWindowSlot0Listeners` on `bot.inventory` and every `bot.currentWindow`
+ *     (including deferred `inject_allowed` / `open_window` / `windowOpen` hooks) so `promise_utils.once`
+ *     never stalls for 20,000ms throwing `Event updateSlot:0 did not fire within timeout of 20000ms`.
+ *  2. Clears `bot.lastDigTime` prior to window operations so hotbar slot clicks right after chopping
  *     or mining do not block for 500ms (`DIG_CLICK_TIMEOUT`).
  */
 function installFastWindowClickShim(bot, options = {}) {
-  if (!bot || bot._gtlFastClickShimmed || typeof bot.clickWindow !== 'function') return;
+  if (!bot) return;
   const slot0TimeoutMs = options.slot0TimeoutMs ?? 80;
-  const origClickWindow = bot.clickWindow.bind(bot);
 
-  bot.clickWindow = async (slot, mouseButton, mode) => {
-    if (bot.lastDigTime != null) {
-      bot.lastDigTime = null;
+  const applyWindowAndMethodHooks = () => {
+    if (bot.inventory) {
+      guardWindowSlot0Listeners(bot.inventory, slot0TimeoutMs);
+    }
+    if (bot.currentWindow) {
+      guardWindowSlot0Listeners(bot.currentWindow, slot0TimeoutMs);
     }
 
-    const activeWindow = bot.currentWindow || bot.inventory;
-    const winType = String(activeWindow?.type || '');
-    const waitsOnSlot0 =
-      activeWindow &&
-      typeof activeWindow.emit === 'function' &&
-      ((winType === 'minecraft:inventory' && slot >= 0 && slot <= 4) ||
-        (winType.startsWith('minecraft:crafting') && slot >= 0 && slot <= 9));
-
-    let unblockTimer = null;
-    if (waitsOnSlot0) {
-      unblockTimer = setTimeout(() => {
-        const cur0 = activeWindow.slots?.[0] ?? null;
-        activeWindow.emit('updateSlot:0', cur0, cur0);
-      }, slot0TimeoutMs);
-    }
-
-    try {
-      return await origClickWindow(slot, mouseButton, mode);
-    } finally {
-      if (unblockTimer) clearTimeout(unblockTimer);
+    for (const fnName of ['clickWindow', 'putAway', 'moveSlotItem', 'transfer', 'equip']) {
+      if (typeof bot[fnName] === 'function' && !bot[fnName]._gtlWrapped) {
+        const origFn = bot[fnName].bind(bot);
+        const wrapped = async (...args) => {
+          if (bot.lastDigTime != null) {
+            bot.lastDigTime = null;
+          }
+          if (bot.inventory) guardWindowSlot0Listeners(bot.inventory, slot0TimeoutMs);
+          if (bot.currentWindow) guardWindowSlot0Listeners(bot.currentWindow, slot0TimeoutMs);
+          return origFn(...args);
+        };
+        wrapped._gtlWrapped = true;
+        bot[fnName] = wrapped;
+      }
     }
   };
 
-  bot._gtlFastClickShimmed = true;
+  applyWindowAndMethodHooks();
+
+  if (!bot._gtlWindowLifecycleHooked && typeof bot.on === 'function') {
+    bot._gtlWindowLifecycleHooked = true;
+    bot.on('inject_allowed', applyWindowAndMethodHooks);
+    bot.on('spawn', applyWindowAndMethodHooks);
+    bot.on('windowOpen', (win) => {
+      guardWindowSlot0Listeners(win, slot0TimeoutMs);
+      applyWindowAndMethodHooks();
+    });
+    if (bot._client && typeof bot._client.on === 'function') {
+      bot._client.on('open_window', () => {
+        if (bot.currentWindow) {
+          guardWindowSlot0Listeners(bot.currentWindow, slot0TimeoutMs);
+        }
+        setImmediate(() => {
+          if (bot.currentWindow) {
+            guardWindowSlot0Listeners(bot.currentWindow, slot0TimeoutMs);
+          }
+        });
+      });
+    }
+  }
 }
 
 /**
@@ -777,6 +858,7 @@ module.exports = {
   GTLBehaviorState: GTNHBehaviorState,
   installPhysicTickDeprecationShim,
   installFastWindowClickShim,
+  guardWindowSlot0Listeners,
   resolveWorldBlockIdsForRawItem,
   buildGTNHStateMachine,
   buildGTLStateMachine: buildGTNHStateMachine

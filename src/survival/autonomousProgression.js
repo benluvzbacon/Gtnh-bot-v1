@@ -6,7 +6,10 @@ const { EventEmitter } = require('events');
 const Vec3 = require('vec3');
 const { goals } = require('mineflayer-pathfinder');
 const { normalizeItemId } = require('../protocol/forgeHandshake');
-const { installFastWindowClickShim } = require('../statemachine/hierarchy');
+const {
+  installFastWindowClickShim,
+  guardWindowSlot0Listeners
+} = require('../statemachine/hierarchy');
 const { SAFE_WATER_BLOCK_NAMES } = require('../navigation/gtnhNavigator');
 
 const VANILLA_LOG_BLOCKS = [
@@ -440,9 +443,17 @@ class AutonomousProgressionEngine extends EventEmitter {
     this._needsBodyReconcile = false;
     if (!this.bot) return;
 
-    // 1. Clean any leftover 2x2 inventory crafting grid / cursor items persisted on the player body
-    if (this.bot.inventory && typeof this.bot.clickWindow === 'function') {
-      await this._ensureCleanCraftingGrid(this.bot.inventory, 4);
+    installFastWindowClickShim(this.bot, { slot0TimeoutMs: 80 });
+
+    // 1. Force an authoritative `window_items` sync from the 1.20.1 server (in case `window_items(0)`
+    // arrived over 127.0.0.1 before Mineflayer's `setTimeout(inject_allowed, 0)`), then sweep any
+    // leftover 2x2 inventory crafting grid / cursor items persisted on the player body!
+    if (this.bot.inventory) {
+      guardWindowSlot0Listeners(this.bot.inventory, 80);
+      await this._syncWindowSafe(this.bot.inventory, 300);
+      if (typeof this.bot.clickWindow === 'function') {
+        await this._ensureCleanCraftingGrid(this.bot.inventory, 4);
+      }
     }
 
     // 2. If spawned underwater or floating in water, swim onto dry shore before anchoring Base Camp
@@ -635,10 +646,17 @@ class AutonomousProgressionEngine extends EventEmitter {
             })
           ]);
         } catch (err) {
-          if (String(err?.message || '').includes('watchdog')) {
-            await this._recoverFromStall(err.message);
-          } else {
-            this._log('warn', `Recovered from cycle interruption: ${err.message}`);
+          this._log('warn', `Recovered from cycle interruption: ${err.message}`);
+          await this._recoverFromStall(err?.message || 'cycle interruption');
+          if (this.bot?.inventory) {
+            await this._syncWindowSafe(this.bot.inventory, 250);
+            if (typeof this.bot.clickWindow === 'function') {
+              try {
+                await this._ensureCleanCraftingGrid(this.bot.inventory, 4);
+              } catch (_) {
+                // Safe cleanup
+              }
+            }
           }
         } finally {
           if (watchdogTimer) clearTimeout(watchdogTimer);
@@ -1798,6 +1816,7 @@ class AutonomousProgressionEngine extends EventEmitter {
     }
     await this._safeGotoNear(tableBlock.position, 2, 8000);
     this._sharedTableWindow = await this.bot.openBlock(tableBlock);
+    guardWindowSlot0Listeners(this._sharedTableWindow, 80);
     try {
       return await fn();
     } finally {
@@ -1815,17 +1834,21 @@ class AutonomousProgressionEngine extends EventEmitter {
 
   /**
    * Crafts vanilla items (`planks`, `stick`, `crafting_table`, `wooden_pickaxe`, `stone_pickaxe`,
-   * `furnace`, `chest`, `iron_pickaxe`, `bucket`, `blast_furnace`):
+   * `furnace`, `chest`, `iron_pickaxe`, `bucket`, `blast_furnace`, etc.):
    *  - On live servers (`this.bot._client`), uses grouped single-pickup + 1-tick Shift-Click on
-   *    Result Slot `0` (and GTL's `8x #logs -> 4x chest` shortcut), bypassing Mineflayer `craft.js`'s
-   *    1-by-1 `craftOnce` + `bot._syncWindow` stall!
-   *  - Falls back seamlessly to `bot.craft` whenever needed.
+   *    Result Slot `0` (and GTL's `8x #logs -> 4x chest` shortcut), completely avoiding Mineflayer
+   *    `craft.js` (`window.updateSlot(0, fakeItem)` + `bot.putAway(0)` lexical `updateSlot:0` hangs)!
+   *  - Falls back to `bot.craft` in offline/mock harnesses when `_client` is absent.
    */
   async craftVanillaItem(itemShortName, count = 1, requireTable = false) {
     const clean = itemShortName.replace(/^minecraft:/, '');
     const fullId = `minecraft:${clean}`;
 
     if (this.bot?._client && this.bot?.clickWindow) {
+      if (clean.endsWith('_planks')) {
+        return this.craftLogsToPlanksFast(count);
+      }
+
       // GregTech Leisure KubeJS speed shortcut: 8 logs -> 4 chests in 1 click!
       if (clean === 'chest' && this.countInventory('#logs') >= 8) {
         const before = this.countInventory(fullId);
@@ -1841,6 +1864,10 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
 
       const LIVE_SHAPED = {
+        stick: [
+          ['#planks', null],
+          ['#planks', null]
+        ],
         crafting_table: [
           ['#planks', '#planks'],
           ['#planks', '#planks']
@@ -1854,6 +1881,16 @@ class AutonomousProgressionEngine extends EventEmitter {
           [null, 'minecraft:stick', null],
           [null, 'minecraft:stick', null]
         ],
+        wooden_axe: [
+          ['#planks', '#planks', null],
+          ['#planks', 'minecraft:stick', null],
+          [null, 'minecraft:stick', null]
+        ],
+        wooden_shovel: [
+          ['#planks', null, null],
+          ['minecraft:stick', null, null],
+          ['minecraft:stick', null, null]
+        ],
         stone_pickaxe: [
           ['#cobblestone', '#cobblestone', '#cobblestone'],
           [null, 'minecraft:stick', null],
@@ -1863,6 +1900,11 @@ class AutonomousProgressionEngine extends EventEmitter {
           ['#cobblestone', '#cobblestone', null],
           ['#cobblestone', 'minecraft:stick', null],
           [null, 'minecraft:stick', null]
+        ],
+        stone_shovel: [
+          ['#cobblestone', null, null],
+          ['minecraft:stick', null, null],
+          ['minecraft:stick', null, null]
         ],
         stone_sword: [
           ['#cobblestone', null, null],
@@ -1884,10 +1926,30 @@ class AutonomousProgressionEngine extends EventEmitter {
           [null, 'minecraft:stick', null],
           [null, 'minecraft:stick', null]
         ],
+        iron_axe: [
+          ['minecraft:iron_ingot', 'minecraft:iron_ingot', null],
+          ['minecraft:iron_ingot', 'minecraft:stick', null],
+          [null, 'minecraft:stick', null]
+        ],
+        iron_shovel: [
+          ['minecraft:iron_ingot', null, null],
+          ['minecraft:stick', null, null],
+          ['minecraft:stick', null, null]
+        ],
+        iron_sword: [
+          ['minecraft:iron_ingot', null, null],
+          ['minecraft:iron_ingot', null, null],
+          ['minecraft:stick', null, null]
+        ],
         bucket: [
           ['minecraft:iron_ingot', null, 'minecraft:iron_ingot'],
           [null, 'minecraft:iron_ingot', null],
           [null, null, null]
+        ],
+        hopper: [
+          ['minecraft:iron_ingot', null, 'minecraft:iron_ingot'],
+          ['minecraft:iron_ingot', 'minecraft:chest', 'minecraft:iron_ingot'],
+          [null, 'minecraft:iron_ingot', null]
         ],
         blast_furnace: [
           ['minecraft:iron_ingot', 'minecraft:iron_ingot', 'minecraft:iron_ingot'],
@@ -1901,6 +1963,12 @@ class AutonomousProgressionEngine extends EventEmitter {
         const before = this.countInventory(fullId);
         await this.craftShapedLive(shaped, count);
         if (this.countInventory(fullId) > before) return true;
+        // Never fall through to Mineflayer's `bot.craft` on a live 1.20.1 server: `craft.js`
+        // mutates `window.updateSlot(0, item)` client-side and calls `putAway(0)`, desyncing slots!
+        if (this.bot.inventory) {
+          await this._syncWindowSafe(this.bot.inventory, 200);
+        }
+        return false;
       }
     }
 
@@ -1966,6 +2034,8 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
       gridWidth = 3;
     }
+
+    guardWindowSlot0Listeners(window, 80);
 
     // Group destination grid slots by ingredient spec so we pick up each stack ONCE
     const specGroups = new Map();

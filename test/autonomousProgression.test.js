@@ -1085,3 +1085,51 @@ test('GTNHNavigator & AutonomousProgressionEngine swim upward from 4-block-deep 
   agent.shutdown();
 });
 
+test('guardWindowSlot0Listeners unblocks real Mineflayer promise_utils.once(window, "updateSlot:0") inside private closures & deferred inject_allowed', async () => {
+  const { once: mfOnce } = require('mineflayer/lib/promise_utils');
+  const windowsLoader = require('prismarine-windows')('1.20.1');
+
+  // Simulate real `mineflayer.createBot`: `bot.inventory` and `bot.putAway` do NOT exist yet when `attachBot` runs!
+  const bot = new EventEmitter();
+  bot.version = '1.20.1';
+  bot.registry = prismarineRegistry('1.20.1');
+  bot._client = new EventEmitter();
+  bot.entity = { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), height: 1.8, effects: {} };
+  bot.entities = {};
+
+  const agent = new GTLAutomationAgent({
+    autoReconnect: false,
+    enableAutonomousSurvival: false
+  });
+  agent.attachBot(bot, {
+    progressionOptions: { persistState: false, slot0TimeoutMs: 20 }
+  });
+
+  // Now simulate `setTimeout(() => bot.emit('inject_allowed'), 0)` creating `bot.inventory` & a private lexical closure!
+  bot.inventory = windowsLoader.createWindow(0, 'minecraft:inventory', 'Inventory');
+  const privateInternalClick = async () => {
+    // Reproduces `inventory.js` private `clickWindow` + `putAway(0)` calling `promise_utils.once` directly on `window`
+    // WITHOUT calling `bot.clickWindow` (which previously threw `Event updateSlot:0 did not fire within timeout of 20000ms`!)
+    await mfOnce(bot.inventory, 'updateSlot:0', 300);
+  };
+  bot.putAway = async () => {
+    await privateInternalClick();
+  };
+  bot.emit('inject_allowed');
+
+  const t0 = Date.now();
+  await bot.putAway(0);
+  const dt = Date.now() - t0;
+  assert.ok(dt < 200, `Expected private updateSlot:0 wait to resolve via guard (<200ms), took ${dt}ms`);
+
+  // Also verify opened Crafting Table windows emitted via `open_window` are guarded automatically!
+  bot.currentWindow = windowsLoader.createWindow(1, 'minecraft:crafting', 'Crafting', 46);
+  bot._client.emit('open_window', { windowId: 1 });
+  const t1 = Date.now();
+  await mfOnce(bot.currentWindow, 'updateSlot:0', 300);
+  assert.ok(Date.now() - t1 < 200, 'Opened crafting window must also auto-unblock updateSlot:0');
+
+  agent.shutdown();
+});
+
+
