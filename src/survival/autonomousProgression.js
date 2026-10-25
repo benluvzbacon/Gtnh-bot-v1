@@ -262,7 +262,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       options.stateFilePath ??
       path.resolve(process.cwd(), '.gtl-runtime-state.json');
     this.persistState = options.persistState ?? true;
-    this.stepIntervalMs = options.stepIntervalMs ?? 650;
+    this.stepIntervalMs = options.stepIntervalMs ?? 55;
     this.searchRadius = options.searchRadius ?? 64;
     this.actionDelayScale = options.actionDelayScale ?? 1;
 
@@ -273,6 +273,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       stations: {
         craftingTable: null,
         furnace: null,
+        furnaceAux: null,
         blastFurnace: null,
         chests: [],
         boiler: null,
@@ -679,11 +680,12 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Walks over nearby dropped item entities so mined logs/ores/cobblestone enter `bot.inventory`.
+   * Sweeps nearby dropped item entities outside Minecraft's automatic 1.45-block pickup magnet
+   * in a single non-stop sprint pass (zero post-drop sleep).
    */
   async collectNearbyDrops(centerPos, radius = 7) {
     if (!this.bot?.entities || !this.bot?.entity) return;
-    await this._delay(220);
+    await this._delay(80);
 
     const origin = centerPos
       ? new Vec3(centerPos.x, centerPos.y, centerPos.z)
@@ -694,25 +696,35 @@ class AutonomousProgressionEngine extends EventEmitter {
         if (!ent || !ent.position) return false;
         const n = String(ent.name || ent.objectType || '').toLowerCase();
         const isItem = n === 'item' || n === 'minecraft:item' || ent.type === 'object';
-        return isItem && ent.position.distanceTo(origin) <= radius;
+        if (!isItem || ent.position.distanceTo(origin) > radius) return false;
+        // Items within ~1.4 blocks of the bot are pulled in automatically by Minecraft's item magnet
+        return ent.position.distanceTo(this.bot.entity.position) > 1.35;
       })
-      .sort((a, b) => a.position.distanceTo(origin) - b.position.distanceTo(origin))
+      .sort((a, b) => a.position.distanceTo(this.bot.entity.position) - b.position.distanceTo(this.bot.entity.position))
       .slice(0, 6);
 
     for (const drop of drops) {
       if (!this.bot.entities[drop.id]) continue;
-      await this._safeGotoNear(drop.position, 1, 5000);
-      await this._delay(180);
+      await this._safeGotoNear(drop.position, 1, 3500);
     }
   }
 
-  async digAndCollectBlock(block) {
+  /**
+   * Breaks a block with instant yaw/pitch snap (`forceLook = true` — 0ms head-turn delay).
+   * Pass `{ skipCollect: true, skipEquip: true }` inside multi-block bursts so whole trees and
+   * stone/ore clusters break back-to-back without stopping after every single block!
+   */
+  async digAndCollectBlock(block, options = {}) {
     if (!block || !this.bot) return false;
     const targetPos = block.position.clone();
-    const reached = await this._safeGotoNear(targetPos, 3, 14000);
-    if (!reached && this.bot.entity?.position?.distanceTo(targetPos) > 4.6) {
-      this._blacklistPos(targetPos);
-      return false;
+    const myDist = this.bot.entity?.position ? this.bot.entity.position.distanceTo(targetPos) : 0;
+
+    if (myDist > 4.2) {
+      const reached = await this._safeGotoNear(targetPos, 2, 10000);
+      if (!reached && this.bot.entity?.position?.distanceTo(targetPos) > 4.6) {
+        this._blacklistPos(targetPos);
+        return false;
+      }
     }
 
     const freshBlock = this.bot.blockAt ? this.bot.blockAt(targetPos) : block;
@@ -720,16 +732,23 @@ class AutonomousProgressionEngine extends EventEmitter {
       return true;
     }
 
-    await this.equipBestToolForBlock(freshBlock);
+    if (!options.skipEquip) {
+      await this.equipBestToolForBlock(freshBlock);
+    }
+
     if (typeof this.bot.dig === 'function') {
       try {
-        await this.bot.dig(freshBlock);
+        // `forceLook = true` snaps camera instantly on the same tick instead of panning over 300-500ms!
+        await this.bot.dig(freshBlock, true);
       } catch (_) {
         this._blacklistPos(targetPos, 60000);
         return false;
       }
     }
-    await this.collectNearbyDrops(targetPos, 6);
+
+    if (!options.skipCollect) {
+      await this.collectNearbyDrops(targetPos, 6);
+    }
     return true;
   }
 
@@ -899,7 +918,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
     }
 
-    await this._delay(200);
+    await this._delay(40);
 
     // Optional rain-shield roof 3 blocks overhead for LV+ electric machines!
     if (options.buildRainRoof && this.bot?.blockAt) {
@@ -948,7 +967,9 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Finds and chops full tree trunks (including rubber trees when needed) and picks up dropped logs.
+   * High-speed continuous lumberjack: sprints tree-to-tree, equips best Axe ONCE, fells the
+   * entire trunk (`y..y+6` + connected branch logs within reach) in one non-stop burst with
+   * ZERO inter-block delay, and sweeps all fallen logs in a single pass per tree!
    */
   async gatherWood(targetTotalLogs = 8, includeRubberTrees = false) {
     if (!this.bot?.findBlocks) return false;
@@ -959,45 +980,84 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (b) logBlockIds.push(b.id);
     }
     if (includeRubberTrees) {
-      const rub = this.bot.registry?.blocksByName?.['gtceu:rubber_log'] ||
+      const rub =
+        this.bot.registry?.blocksByName?.['gtceu:rubber_log'] ||
         this.bot.registry?.blocksByName?.rubber_log;
       if (rub) logBlockIds.push(rub.id);
     }
 
-    const candidates = this.bot
-      .findBlocks({
-        matching: logBlockIds,
-        maxDistance: this.searchRadius,
-        count: 16
-      })
-      .filter((p) => !this._isBlacklisted(p));
+    // Fell up to 4 trees in a single continuous run so we hit `targetTotalLogs` in one trip!
+    for (let treeIdx = 0; treeIdx < 4; treeIdx++) {
+      if (this.countInventory('#logs') >= targetTotalLogs) return true;
 
-    if (candidates.length === 0) {
-      await this.exploreNextRing();
-      return false;
+      const candidates = this.bot
+        .findBlocks({
+          matching: logBlockIds,
+          maxDistance: this.searchRadius,
+          count: 24
+        })
+        .filter((p) => !this._isBlacklisted(p));
+
+      if (candidates.length === 0) {
+        await this.exploreNextRing();
+        return false;
+      }
+
+      // Walk down to the lowest log of the nearest trunk so we chop bottom-to-top cleanly
+      let trunkBase = candidates[0];
+      while (this.bot.blockAt) {
+        const below = this.bot.blockAt(trunkBase.offset(0, -1, 0));
+        if (below && String(below.name || '').includes('log')) {
+          trunkBase = trunkBase.offset(0, -1, 0);
+        } else {
+          break;
+        }
+      }
+
+      this._log(
+        'info',
+        `Felling tree at (${trunkBase.x}, ${trunkBase.y}, ${trunkBase.z}) [logs: ${this.countInventory('#logs')}/${targetTotalLogs}]...`
+      );
+
+      const reached = await this._safeGotoNear(trunkBase, 2, 10000);
+      if (!reached && this.bot.entity?.position?.distanceTo(trunkBase) > 4.6) {
+        this._blacklistPos(trunkBase);
+        continue;
+      }
+
+      const firstLog = this.bot.blockAt(trunkBase);
+      if (firstLog) {
+        await this.equipBestToolForBlock(firstLog);
+      }
+
+      // Break all vertical trunk logs + adjacent 2x2/branch logs within 4.3-block reach back-to-back!
+      for (let dy = 0; dy < 6; dy++) {
+        for (const [ox, oz] of [
+          [0, 0],
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1]
+        ]) {
+          const pos = trunkBase.offset(ox, dy, oz);
+          const blk = this.bot.blockAt(pos);
+          if (!blk || !String(blk.name || '').includes('log')) continue;
+          if (this.bot.entity?.position && this.bot.entity.position.distanceTo(pos) > 4.4) continue;
+          const ok = await this.digAndCollectBlock(blk, { skipCollect: true, skipEquip: true });
+          if (!ok && ox === 0 && oz === 0) break;
+        }
+      }
+
+      // Single fast drop sweep once the whole tree is down
+      await this.collectNearbyDrops(trunkBase, 6);
     }
 
-    const trunkBase = candidates[0];
-    this._log(
-      'info',
-      `Chopping tree at (${trunkBase.x}, ${trunkBase.y}, ${trunkBase.z}) [logs: ${this.countInventory('#logs')}/${targetTotalLogs}]...`
-    );
-
-    // Chop up to 5 vertical trunk blocks from bottom to top
-    for (let dy = 0; dy < 5; dy++) {
-      const pos = trunkBase.offset(0, dy, 0);
-      const blk = this.bot.blockAt(pos);
-      if (!blk || !String(blk.name || '').includes('log')) break;
-      const ok = await this.digAndCollectBlock(blk);
-      if (!ok) break;
-    }
-
-    await this.collectNearbyDrops(trunkBase, 7);
     return this.countInventory('#logs') >= targetTotalLogs;
   }
 
   /**
-   * Mines cobblestone / stone (uncovering dirt/grass overburden if needed), clay, sand, or gravel.
+   * High-speed burst mining for cobblestone/stone (preferring Base Camp's adjacent quarry
+   * within 16 blocks before ever walking far away!), clay, sand, or gravel.
    */
   async gatherSurfaceBlocks(blockNames, targetSpec, targetCount) {
     if (!this.bot?.findBlocks) return false;
@@ -1008,28 +1068,44 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (entry) blockIds.push(entry.id);
     }
 
+    const isStoneQuery = blockNames.includes('stone');
+
+    // For stone/cobblestone, check right beside Base Camp (<= 18 blocks) FIRST so we never hike 50m away!
     let positions = this.bot
       .findBlocks({
         matching: blockIds,
-        maxDistance: this.searchRadius,
+        maxDistance: isStoneQuery ? 18 : this.searchRadius,
         count: 24
       })
       .filter((p) => !this._isBlacklisted(p));
 
-    // If mining stone/cobblestone in grassy plains where stone is 2-3 blocks under dirt, dig down 3 blocks near Base!
-    if (positions.length === 0 && blockNames.includes('stone') && this.bot.blockAt) {
-      const quarrySpot = this.ensureBaseAnchor().offset(-5, -1, -5);
-      const topBlk = this.bot.blockAt(quarrySpot);
-      if (topBlk && (topBlk.name === 'grass_block' || topBlk.name === 'dirt')) {
-        await this.digAndCollectBlock(topBlk);
-        positions = this.bot
-          .findBlocks({
-            matching: blockIds,
-            maxDistance: 24,
-            count: 12
-          })
-          .filter((p) => !this._isBlacklisted(p));
+    // If stone is covered by grass/dirt near Base Camp, strip 1-3 dirt blocks right at Base Quarry (-3, -1..-3, -2)!
+    if (positions.length === 0 && isStoneQuery && this.bot.blockAt) {
+      const quarryBase = this.ensureBaseAnchor().offset(-3, 0, -2);
+      await this._safeGotoNear(quarryBase, 2, 6000);
+      for (let depth = 1; depth <= 3; depth++) {
+        const overburden = this.bot.blockAt(quarryBase.offset(0, -depth, 0));
+        if (!overburden || overburden.type === 0) continue;
+        if (STONE_HOST_BLOCKS.has(overburden.name) || overburden.name === 'cobblestone') break;
+        await this.digAndCollectBlock(overburden, { skipCollect: true });
       }
+      positions = this.bot
+        .findBlocks({
+          matching: blockIds,
+          maxDistance: 24,
+          count: 24
+        })
+        .filter((p) => !this._isBlacklisted(p));
+    }
+
+    if (positions.length === 0 && isStoneQuery) {
+      positions = this.bot
+        .findBlocks({
+          matching: blockIds,
+          maxDistance: this.searchRadius,
+          count: 24
+        })
+        .filter((p) => !this._isBlacklisted(p));
     }
 
     if (positions.length === 0) {
@@ -1037,16 +1113,25 @@ class AutonomousProgressionEngine extends EventEmitter {
       return false;
     }
 
-    const batch = positions.slice(0, Math.min(8, Math.max(2, targetCount - this.countInventory(targetSpec))));
+    const needed = Math.max(1, targetCount - this.countInventory(targetSpec));
+    const batch = positions.slice(0, Math.min(14, needed + 1));
+    let equippedOnce = false;
+    let lastPos = batch[0];
+
     for (const pos of batch) {
       if (this.countInventory(targetSpec) >= targetCount) break;
-      // Skip blocks adjacent to lava/water when mining underground stone
       if (this.navigator?.hasAdjacentLava(pos)) continue;
       const blk = this.bot.blockAt(pos);
       if (!blk || blk.type === 0) continue;
-      await this.digAndCollectBlock(blk);
+      if (!equippedOnce) {
+        await this.equipBestToolForBlock(blk);
+        equippedOnce = true;
+      }
+      lastPos = pos;
+      await this.digAndCollectBlock(blk, { skipCollect: true, skipEquip: true });
     }
 
+    await this.collectNearbyDrops(lastPos, 7);
     return this.countInventory(targetSpec) >= targetCount;
   }
 
@@ -1153,14 +1238,22 @@ class AutonomousProgressionEngine extends EventEmitter {
         'info',
         `Mining known ${category} ore vein at (${knownMatches[0].x}, ${knownMatches[0].y}, ${knownMatches[0].z}) [${this.countTotalStock(spec)}/${targetCount}]...`
       );
-      for (const pos of knownMatches.slice(0, 8)) {
+      let equippedOnce = false;
+      let lastPos = knownMatches[0];
+      for (const pos of knownMatches.slice(0, 10)) {
         if (this.countTotalStock(spec) >= targetCount) break;
         if (this.navigator?.hasAdjacentLava(pos)) continue;
         const blk = this.bot.blockAt(pos);
         if (blk && blk.type !== 0) {
-          await this.digAndCollectBlock(blk);
+          if (!equippedOnce) {
+            await this.equipBestToolForBlock(blk);
+            equippedOnce = true;
+          }
+          lastPos = pos;
+          await this.digAndCollectBlock(blk, { skipCollect: true, skipEquip: true });
         }
       }
+      await this.collectNearbyDrops(lastPos, 7);
       return this.countTotalStock(spec) >= targetCount;
     }
 
@@ -1229,15 +1322,269 @@ class AutonomousProgressionEngine extends EventEmitter {
   // LIVE VANILLA + SERVER-AUTHORITATIVE MODDED CRAFTING & SMELTING
   // ===========================================================================
 
+  async _waitForResultSlot(window, maxWaitMs = 90) {
+    if (window.slots?.[0]) return true;
+    if (typeof window.once === 'function') {
+      let timer = null;
+      try {
+        await Promise.race([
+          new Promise((resolve) => window.once('updateSlot:0', resolve)),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, Math.max(5, Math.round(maxWaitMs * this.actionDelayScale)));
+            timer.unref?.();
+          })
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      return Boolean(window.slots?.[0]);
+    }
+    for (let wait = 0; wait < 3; wait++) {
+      if (window.slots?.[0]) return true;
+      await this._delay(25);
+    }
+    return Boolean(window.slots?.[0]);
+  }
+
+  /**
+   * Bulk-converts logs of ANY species (`oak`, `birch`, `spruce`, `jungle`, `acacia`, `dark_oak`,
+   * `cherry`, `mangrove`, `crimson`, `warped`, `gtceu:rubber_log`) into planks in a SINGLE 1-tick
+   * shift-click on live servers (with seamless `craftVanillaItem` fallback).
+   */
+  async craftLogsToPlanksFast(maxLogs = 16) {
+    const logItem = this.findInventoryItem('#logs');
+    if (!logItem) return false;
+
+    const qty = Math.min(maxLogs, logItem.count || 1);
+    const canonical = this.registryBridge.toCanonicalItemId(logItem);
+    const shortLog = canonical.replace(/^minecraft:/, '');
+    const plankCandidate = shortLog
+      .replace(/_log$/, '_planks')
+      .replace(/_stem$/, '_planks');
+
+    // On a live 1.20.1 connection, place the whole log stack into 2x2 slot 1 and shift-click slot 0 ONCE!
+    if (this.bot?._client && this.bot?.clickWindow && this.bot?.inventory) {
+      const inv = this.bot.inventory;
+      const srcSlotObj = inv.slots
+        .slice(inv.inventoryStart ?? 9, inv.inventoryEnd ?? inv.slots.length)
+        .find((s) => s && matchesItemSpec(this.registryBridge.toCanonicalItemId(s), '#logs'));
+
+      if (srcSlotObj) {
+        const planksBefore = this.countInventory('#planks');
+        await this.bot.clickWindow(srcSlotObj.slot, 0, 0);
+        if ((inv.selectedItem?.count || 0) <= qty) {
+          await this.bot.clickWindow(1, 0, 0);
+        } else {
+          for (let i = 0; i < qty; i++) {
+            await this.bot.clickWindow(1, 1, 0);
+          }
+          if (inv.selectedItem) {
+            await this.bot.clickWindow(srcSlotObj.slot, 0, 0);
+          }
+        }
+        await this._waitForResultSlot(inv, 120);
+        if (inv.slots[0]) {
+          await this.bot.clickWindow(0, 0, 1);
+        }
+        if (inv.slots[1]) {
+          await this.bot.clickWindow(1, 0, 1);
+        }
+        if (this.countInventory('#planks') > planksBefore) {
+          return true;
+        }
+      }
+    }
+
+    if (plankCandidate.startsWith('gtceu:')) {
+      return this.craftShapedLive([['#logs', null]], qty);
+    }
+
+    for (const candidate of [
+      plankCandidate,
+      'oak_planks',
+      'birch_planks',
+      'spruce_planks',
+      'jungle_planks',
+      'acacia_planks',
+      'dark_oak_planks',
+      'cherry_planks',
+      'mangrove_planks',
+      'crimson_planks',
+      'warped_planks'
+    ]) {
+      if (await this.craftVanillaItem(candidate, qty, false)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * High-speed stick crafting: uses GregTech Leisure's KubeJS `2x #logs -> 16x stick` recipe
+   * on live servers when logs are available, or bulk-crafts `#planks -> stick`.
+   */
+  async craftSticksFast(targetSticks = 12) {
+    if (this.countInventory('minecraft:stick') >= targetSticks) return true;
+
+    // Try GTL KubeJS fast recipe: 2 vertical logs -> 16 sticks in 1 click!
+    if (this.bot?._client && this.countInventory('#logs') >= 2) {
+      const before = this.countInventory('minecraft:stick');
+      await this.craftShapedLive(
+        [
+          ['#logs', null],
+          ['#logs', null]
+        ],
+        1
+      );
+      if (this.countInventory('minecraft:stick') > before) {
+        return this.countInventory('minecraft:stick') >= targetSticks;
+      }
+    }
+
+    if (this.countInventory('#planks') < 2 && this.countInventory('#logs') > 0) {
+      await this.craftLogsToPlanksFast(4);
+    }
+
+    const deficit = Math.max(1, targetSticks - this.countInventory('minecraft:stick'));
+    const batches = Math.min(
+      Math.floor(this.countInventory('#planks') / 2),
+      Math.max(1, Math.ceil(deficit / 4))
+    );
+    if (batches <= 0) return false;
+    return this.craftVanillaItem('stick', batches, false);
+  }
+
+  /**
+   * Opens Base Camp's Crafting Table ONCE across a multi-recipe batch (`stone_pickaxe` + `stone_axe`,
+   * `Hammer` + `Mortar` + `Plates` + `Wrench` + `File`, etc.) instead of opening & closing 6 times!
+   */
+  async withCraftingTableSession(fn) {
+    if (this._sharedTableWindow) {
+      return fn();
+    }
+    const tableBlock = this.getValidStationBlock('craftingTable', 'crafting_table');
+    if (!tableBlock || typeof this.bot?.openBlock !== 'function') {
+      return fn();
+    }
+    await this._safeGotoNear(tableBlock.position, 2, 8000);
+    this._sharedTableWindow = await this.bot.openBlock(tableBlock);
+    try {
+      return await fn();
+    } finally {
+      const win = this._sharedTableWindow;
+      this._sharedTableWindow = null;
+      if (win && typeof this.bot?.closeWindow === 'function') {
+        try {
+          await this.bot.closeWindow(win);
+        } catch (_) {
+          // Safe close fallback
+        }
+      }
+    }
+  }
+
   /**
    * Crafts vanilla items (`planks`, `stick`, `crafting_table`, `wooden_pickaxe`, `stone_pickaxe`,
-   * `furnace`, `chest`, `iron_pickaxe`, `bucket`, `blast_furnace`) via Mineflayer's `bot.craft`.
+   * `furnace`, `chest`, `iron_pickaxe`, `bucket`, `blast_furnace`):
+   *  - On live servers (`this.bot._client`), uses grouped single-pickup + 1-tick Shift-Click on
+   *    Result Slot `0` (and GTL's `8x #logs -> 4x chest` shortcut), bypassing Mineflayer `craft.js`'s
+   *    1-by-1 `craftOnce` + `bot._syncWindow` stall!
+   *  - Falls back seamlessly to `bot.craft` whenever needed.
    */
   async craftVanillaItem(itemShortName, count = 1, requireTable = false) {
-    if (!this.bot?.recipesFor || !this.bot?.craft) return false;
     const clean = itemShortName.replace(/^minecraft:/, '');
+    const fullId = `minecraft:${clean}`;
+
+    if (this.bot?._client && this.bot?.clickWindow) {
+      // GregTech Leisure KubeJS speed shortcut: 8 logs -> 4 chests in 1 click!
+      if (clean === 'chest' && this.countInventory('#logs') >= 8) {
+        const before = this.countInventory(fullId);
+        await this.craftShapedLive(
+          [
+            ['#logs', '#logs', '#logs'],
+            ['#logs', null, '#logs'],
+            ['#logs', '#logs', '#logs']
+          ],
+          1
+        );
+        if (this.countInventory(fullId) > before) return true;
+      }
+
+      const LIVE_SHAPED = {
+        crafting_table: [
+          ['#planks', '#planks'],
+          ['#planks', '#planks']
+        ],
+        bricks: [
+          ['minecraft:brick', 'minecraft:brick'],
+          ['minecraft:brick', 'minecraft:brick']
+        ],
+        wooden_pickaxe: [
+          ['#planks', '#planks', '#planks'],
+          [null, 'minecraft:stick', null],
+          [null, 'minecraft:stick', null]
+        ],
+        stone_pickaxe: [
+          ['#cobblestone', '#cobblestone', '#cobblestone'],
+          [null, 'minecraft:stick', null],
+          [null, 'minecraft:stick', null]
+        ],
+        stone_axe: [
+          ['#cobblestone', '#cobblestone', null],
+          ['#cobblestone', 'minecraft:stick', null],
+          [null, 'minecraft:stick', null]
+        ],
+        stone_sword: [
+          ['#cobblestone', null, null],
+          ['#cobblestone', null, null],
+          ['minecraft:stick', null, null]
+        ],
+        furnace: [
+          ['#cobblestone', '#cobblestone', '#cobblestone'],
+          ['#cobblestone', null, '#cobblestone'],
+          ['#cobblestone', '#cobblestone', '#cobblestone']
+        ],
+        chest: [
+          ['#planks', '#planks', '#planks'],
+          ['#planks', null, '#planks'],
+          ['#planks', '#planks', '#planks']
+        ],
+        iron_pickaxe: [
+          ['minecraft:iron_ingot', 'minecraft:iron_ingot', 'minecraft:iron_ingot'],
+          [null, 'minecraft:stick', null],
+          [null, 'minecraft:stick', null]
+        ],
+        bucket: [
+          ['minecraft:iron_ingot', null, 'minecraft:iron_ingot'],
+          [null, 'minecraft:iron_ingot', null],
+          [null, null, null]
+        ],
+        blast_furnace: [
+          ['minecraft:iron_ingot', 'minecraft:iron_ingot', 'minecraft:iron_ingot'],
+          ['minecraft:iron_ingot', 'minecraft:furnace', 'minecraft:iron_ingot'],
+          ['minecraft:smooth_stone', 'minecraft:smooth_stone', 'minecraft:smooth_stone']
+        ]
+      };
+
+      const shaped = LIVE_SHAPED[clean];
+      if (shaped) {
+        const before = this.countInventory(fullId);
+        await this.craftShapedLive(shaped, count);
+        if (this.countInventory(fullId) > before) return true;
+      }
+    }
+
+    if (!this.bot?.recipesFor || !this.bot?.craft) return false;
     const entry = this.bot.registry?.itemsByName?.[clean];
     if (!entry) return false;
+
+    if (this._sharedTableWindow && typeof this.bot?.closeWindow === 'function') {
+      const win = this._sharedTableWindow;
+      this._sharedTableWindow = null;
+      try {
+        await this.bot.closeWindow(win);
+      } catch (_) {
+        // Ignore
+      }
+    }
 
     let tableBlock = null;
     if (requireTable) {
@@ -1258,13 +1605,12 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Crafts ANY vanilla OR modded (`gtceu:*` / `kubejs:*`) 2x2 or 3x3 shaped/shapeless recipe
-   * directly on a live Crafting Table (or 2x2 inventory grid) by placing matched ingredients into
-   * grid slots `1..9`, waiting for Forge 1.20.1's server-computed `ResultSlot` (`0`), shift-clicking
-   * slot `0` into inventory, and reclaiming any remaining GTCEu hand tools from `1..9`!
-   *
-   * @param {Array<Array<string|null>>} gridRows - e.g. `[['minecraft:iron_ingot','minecraft:iron_ingot','minecraft:iron_ingot'],['minecraft:iron_ingot','minecraft:iron_ingot','minecraft:iron_ingot'],[null,'minecraft:stick',null]]`
-   * @param {number} [times=1]
+   * High-speed grouped 2x2 / 3x3 Crafting Table clicker for BOTH vanilla and modded GTCEu/KubeJS recipes:
+   *  - Reuses `_sharedTableWindow` when inside `withCraftingTableSession`,
+   *  - Groups cells sharing the same ingredient so each inventory stack is picked up ONCE (cutting
+   *    window-click packets by 60-80%),
+   *  - Stacks full `times` batches into grid slots at once whenever no non-stackable GTCEu hand tool
+   *    is present so a SINGLE Shift-Click (`mode = 1`) on Result Slot `0` crafts the entire batch in 1 tick!
    */
   async craftShapedLive(gridRows, times = 1) {
     if (!this.bot?.clickWindow) return false;
@@ -1274,54 +1620,73 @@ class AutonomousProgressionEngine extends EventEmitter {
 
     let window = this.bot.inventory;
     let gridWidth = 2;
-    let openedTableWindow = null;
+    let openedLocally = false;
 
     if (needsTable) {
-      const tableBlock = this.getValidStationBlock('craftingTable', 'crafting_table');
-      if (!tableBlock || typeof this.bot.openBlock !== 'function') return false;
-      await this._safeGotoNear(tableBlock.position, 2, 10000);
-      openedTableWindow = await this.bot.openBlock(tableBlock);
-      window = openedTableWindow;
+      if (this._sharedTableWindow) {
+        window = this._sharedTableWindow;
+      } else {
+        const tableBlock = this.getValidStationBlock('craftingTable', 'crafting_table');
+        if (!tableBlock || typeof this.bot.openBlock !== 'function') return false;
+        await this._safeGotoNear(tableBlock.position, 2, 10000);
+        window = await this.bot.openBlock(tableBlock);
+        openedLocally = true;
+      }
       gridWidth = 3;
     }
 
+    // Group destination grid slots by ingredient spec so we pick up each stack ONCE
+    const specGroups = new Map();
+    let hasGtTool = false;
+    for (let r = 0; r < gridRows.length; r++) {
+      for (let c = 0; c < gridRows[r].length; c++) {
+        const spec = gridRows[r][c];
+        if (!spec) continue;
+        if (String(spec).startsWith('#gtceu:')) hasGtTool = true;
+        const destSlot = 1 + c + r * gridWidth;
+        const key = String(spec);
+        if (!specGroups.has(key)) specGroups.set(key, { spec, destSlots: [] });
+        specGroups.get(key).destSlots.push(destSlot);
+      }
+    }
+
+    // On a live server with stackable ingredients, place `times` per cell and shift-click slot 0 ONCE!
+    const canBulkStackShift = Boolean(this.bot?._client && !hasGtTool && times > 1);
+    const outerIters = canBulkStackShift ? 1 : times;
+    const perCellCount = canBulkStackShift ? times : 1;
+
     try {
-      for (let iter = 0; iter < times; iter++) {
-        // Place each non-null cell 1 item at a time into crafting grid slots 1..(gridWidth*gridHeight)
-        for (let r = 0; r < gridRows.length; r++) {
-          for (let c = 0; c < gridRows[r].length; c++) {
-            const spec = gridRows[r][c];
-            if (!spec) continue;
-            const destSlot = 1 + c + r * gridWidth;
+      for (let iter = 0; iter < outerIters; iter++) {
+        for (const { spec, destSlots } of specGroups.values()) {
+          let heldFromSlot = null;
 
-            const srcSlotObj = window.slots
-              .slice(window.inventoryStart ?? 10, window.inventoryEnd ?? window.slots.length)
-              .find((s) => s && matchesItemSpec(this.registryBridge.toCanonicalItemId(s), spec));
-
-            if (!srcSlotObj) {
-              return false;
+          for (const destSlot of destSlots) {
+            for (let k = 0; k < perCellCount; k++) {
+              if (!window.selectedItem) {
+                const srcSlotObj = window.slots
+                  .slice(window.inventoryStart ?? 10, window.inventoryEnd ?? window.slots.length)
+                  .find((s) => s && matchesItemSpec(this.registryBridge.toCanonicalItemId(s), spec));
+                if (!srcSlotObj) {
+                  return false;
+                }
+                heldFromSlot = srcSlotObj.slot;
+                await this.bot.clickWindow(srcSlotObj.slot, 0, 0);
+              }
+              await this.bot.clickWindow(destSlot, 1, 0);
             }
+          }
 
-            // Pick up stack from inventory, right-click 1 into destSlot, return remainder to srcSlot
-            await this.bot.clickWindow(srcSlotObj.slot, 0, 0);
-            await this.bot.clickWindow(destSlot, 1, 0);
-            if (window.selectedItem) {
-              await this.bot.clickWindow(srcSlotObj.slot, 0, 0);
-            }
+          if (window.selectedItem && heldFromSlot !== null) {
+            await this.bot.clickWindow(heldFromSlot, 0, 0);
           }
         }
 
-        // Wait up to 450ms for the Forge server to populate Crafting Result slot 0
-        for (let wait = 0; wait < 9; wait++) {
-          if (window.slots[0]) break;
-          await this._delay(50);
-        }
+        await this._waitForResultSlot(window, 90);
 
         // Shift-click result slot 0 (`mode = 1` quick_move) into player inventory
         await this.bot.clickWindow(0, 0, 1);
-        await this._delay(80);
 
-        // Reclaim any remaining GTCEu tools (Hammer, File, Wrench, Mortar, etc.) left in grid 1..9
+        // Reclaim any remaining GTCEu tools (Hammer, File, Wrench, Mortar) left in grid 1..9
         const maxGridSlot = gridWidth * gridWidth;
         for (let g = 1; g <= maxGridSlot; g++) {
           if (window.slots[g]) {
@@ -1331,9 +1696,9 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
       return true;
     } finally {
-      if (openedTableWindow && typeof this.bot.closeWindow === 'function') {
+      if (openedLocally && window && typeof this.bot.closeWindow === 'function') {
         try {
-          await this.bot.closeWindow(openedTableWindow);
+          await this.bot.closeWindow(window);
         } catch (_) {
           // Safe close fallback
         }
@@ -1342,41 +1707,32 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   /**
-   * Ensures sufficient furnace fuel (`coal`/`lignite` first, or converts `1 log -> 4 planks`
+   * Ensures sufficient furnace fuel (`coal`/`lignite` first, or bulk-converts `1 log -> 4 planks`
    * for 4x smelting efficiency under GTL's `harderCharcoalRecipe: true`).
    */
   async ensureFurnaceFuel(minFuelItems = 6) {
     if (this.countInventory('#furnace_fuel') >= minFuelItems) return true;
 
     if (this.countInventory('#logs') > 0) {
-      for (const plankName of [
-        'oak_planks',
-        'birch_planks',
-        'spruce_planks',
-        'jungle_planks',
-        'acacia_planks',
-        'dark_oak_planks',
-        'cherry_planks',
-        'mangrove_planks'
-      ]) {
-        if (await this.craftVanillaItem(plankName, 2, false)) break;
-      }
+      await this.craftLogsToPlanksFast(Math.max(2, Math.ceil(minFuelItems / 4)));
       if (this.countInventory('#furnace_fuel') >= minFuelItems) return true;
     }
 
-    // Try nearby coal veins first, otherwise chop wood
     const coalScan = this.scanChunkMemoryForGtceuVeins('coal');
     if (coalScan.knownMatches.length > 0) {
       await this.prospectAndMineOre('coal', minFuelItems);
     } else {
-      await this.gatherWood(3, false);
+      await this.gatherWood(4, false);
+      await this.craftLogsToPlanksFast(4);
     }
     return this.countInventory('#furnace_fuel') >= minFuelItems;
   }
 
   /**
-   * Smelts items inside Base Camp's `minecraft:blast_furnace` (1-tick instant smelting in GTL!)
-   * or `minecraft:furnace` using available coal / planks / logs / sticks fuel.
+   * High-speed smelter:
+   *  - Uses Base Camp's 1-Tick `minecraft:blast_furnace` (`0.05s/item` in GTL!) whenever available,
+   *  - Before `blast_furnace` is unlocked, automatically splits batches across BOTH parallel
+   *    Base Camp Furnaces (`furnace` + `furnaceAux`) simultaneously — cutting smelt wait time in HALF!
    */
   async smeltItemsLive(inputSpec, count = 4, preferBlastFurnace = true) {
     if (typeof this.bot?.openFurnace !== 'function') return false;
@@ -1384,9 +1740,131 @@ class AutonomousProgressionEngine extends EventEmitter {
     const blastBlock = preferBlastFurnace
       ? this.getValidStationBlock('blastFurnace', 'blast_furnace')
       : null;
-    const furnaceBlock = blastBlock || this.getValidStationBlock('furnace', 'furnace');
-    if (!furnaceBlock) return false;
 
+    if (blastBlock) {
+      return this._smeltInSingleFurnace(blastBlock, inputSpec, count, true);
+    }
+
+    const f1 = this.getValidStationBlock('furnace', 'furnace');
+    const f2 = this.getValidStationBlock('furnaceAux', 'furnace');
+    if (!f1) return false;
+
+    const inputItem = this.findInventoryItem(inputSpec);
+    if (!inputItem) return false;
+    const totalBatch = Math.min(count, inputItem.count || 1);
+
+    // Parallel dual-furnace split when 2 distinct furnaces exist and batch >= 4!
+    if (
+      f2 &&
+      !f2.position.equals(f1.position) &&
+      totalBatch >= 4 &&
+      this.countInventory('#furnace_fuel') >= 4
+    ) {
+      const half1 = Math.ceil(totalBatch / 2);
+      const half2 = totalBatch - half1;
+      await this._safeGotoNear(f1.position, 2, 8000);
+      const handle1 = await this._loadFurnaceNoWait(f1, inputSpec, half1);
+      // On real Minecraft servers, opening f2 closes f1's GUI while f1 keeps burning on the server!
+      if (this.bot?._client && handle1) {
+        handle1.close();
+      }
+      const handle2 = await this._loadFurnaceNoWait(f2, inputSpec, half2);
+
+      const maxWaitMs = half1 * 10400 + 800;
+      if (handle2) {
+        await this._waitForFurnaceBatch(handle2, half2, maxWaitMs);
+        await this._unloadFurnaceHandle(handle2);
+      }
+
+      if (this.bot?._client) {
+        await this._safeGotoNear(f1.position, 2, 6000);
+        const reopen1 = await this.bot.openFurnace(f1);
+        await this._waitForFurnaceBatch(reopen1, half1, 3500);
+        await this._unloadFurnaceHandle(reopen1);
+      } else {
+        await this._unloadFurnaceHandle(handle1);
+      }
+      return true;
+    }
+
+    return this._smeltInSingleFurnace(f1, inputSpec, totalBatch, false);
+  }
+
+  /**
+   * Event-driven furnace completion listener: resolves the INSTANT all inputs finish smelting
+   * (`!furnace.inputItem()`) or `outputItem().count >= expectedCount`, rather than sleeping blindly!
+   */
+  async _waitForFurnaceBatch(furnace, expectedCount, maxWaitMs) {
+    if (!furnace) return;
+    const isFinished = () => {
+      const inp = furnace.inputItem?.();
+      const out = furnace.outputItem?.();
+      if (!inp && out) return true;
+      if ((out?.count ?? 0) >= expectedCount) return true;
+      return false;
+    };
+    if (isFinished()) return;
+
+    const scaledMax = Math.max(0, Math.round(maxWaitMs * this.actionDelayScale));
+    if (scaledMax === 0) return;
+
+    if (typeof furnace.on === 'function' && typeof furnace.removeListener === 'function') {
+      await new Promise((resolve) => {
+        let timer = null;
+        const check = () => {
+          if (isFinished()) {
+            cleanup();
+            resolve();
+          }
+        };
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          furnace.removeListener('updateSlot', check);
+          furnace.removeListener('update', check);
+        };
+        furnace.on('updateSlot', check);
+        furnace.on('update', check);
+        timer = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, scaledMax);
+        timer.unref?.();
+      });
+      return;
+    }
+
+    await sleepMs(scaledMax);
+  }
+
+  async _loadFurnaceNoWait(furnaceBlock, inputSpec, batchCount) {
+    const inputItem = this.findInventoryItem(inputSpec);
+    const fuelItem = this.findInventoryItem('#furnace_fuel');
+    if (!inputItem || !fuelItem || batchCount <= 0) return null;
+
+    const furnace = await this.bot.openFurnace(furnaceBlock);
+    if (!furnace.fuelItem()) {
+      const fuelQty = Math.min(fuelItem.count || 1, Math.max(1, Math.ceil(batchCount / 2)));
+      await furnace.putFuel(fuelItem.type, null, fuelQty);
+    }
+    if (furnace.outputItem()) {
+      await furnace.takeOutput();
+    }
+    const qty = Math.min(batchCount, inputItem.count || 1);
+    await furnace.putInput(inputItem.type, null, qty);
+    return furnace;
+  }
+
+  async _unloadFurnaceHandle(furnace) {
+    if (!furnace) return;
+    try {
+      if (furnace.outputItem()) await furnace.takeOutput();
+      if (furnace.inputItem()) await furnace.takeInput();
+    } finally {
+      furnace.close();
+    }
+  }
+
+  async _smeltInSingleFurnace(furnaceBlock, inputSpec, count, isFastBlast) {
     const inputItem = this.findInventoryItem(inputSpec);
     if (!inputItem) return false;
 
@@ -1397,14 +1875,12 @@ class AutonomousProgressionEngine extends EventEmitter {
     if (!fuelItem) return false;
 
     const batchCount = Math.min(count, inputItem.count || 1);
-    const isFastBlast = Boolean(blastBlock && furnaceBlock === blastBlock);
-
-    await this._safeGotoNear(furnaceBlock.position, 2, 10000);
+    await this._safeGotoNear(furnaceBlock.position, 2, 8000);
     const furnace = await this.bot.openFurnace(furnaceBlock);
 
     try {
       if (!furnace.fuelItem()) {
-        const fuelQty = Math.min(fuelItem.count || 1, Math.max(2, Math.ceil(batchCount / 2)));
+        const fuelQty = Math.min(fuelItem.count || 1, Math.max(1, Math.ceil(batchCount / 2)));
         await furnace.putFuel(fuelItem.type, null, fuelQty);
       }
       if (furnace.outputItem()) {
@@ -1412,12 +1888,10 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
       await furnace.putInput(inputItem.type, null, batchCount);
 
-      // In GregTech Leisure (`开荒加速`), Blast Furnace takes 1 tick (50ms/item)!
-      // Standard Furnace takes 40 ticks (2s) for Wrought Iron or 200 ticks (10s) for ores.
-      const waitMs = isFastBlast
-        ? Math.min(2500, 250 + batchCount * 120)
-        : Math.min(14000, 1200 + batchCount * 2200);
-      await this._delay(waitMs);
+      const maxWaitMs = isFastBlast
+        ? Math.min(2500, 150 + batchCount * 100)
+        : batchCount * 10400 + 800;
+      await this._waitForFurnaceBatch(furnace, batchCount, maxWaitMs);
 
       if (furnace.outputItem()) {
         await furnace.takeOutput();
@@ -1432,11 +1906,11 @@ class AutonomousProgressionEngine extends EventEmitter {
   }
 
   // ===========================================================================
-  // ORDERED MODPACK PROGRESSION MILESTONES (ZERO -> ENDGAME)
+  // ORDERED SPEEDRUNNER MODPACK PROGRESSION MILESTONES (ZERO -> ENDGAME)
   // ===========================================================================
 
   /**
-   * Executes one intelligent decision cycle of the autonomous GregTech Leisure progression ladder.
+   * Executes one high-speed chained cycle of the autonomous GregTech Leisure progression ladder.
    */
   async runSingleCycle() {
     if (await this.performSurvivalSelfCare()) {
@@ -1444,59 +1918,41 @@ class AutonomousProgressionEngine extends EventEmitter {
     }
 
     // -------------------------------------------------------------------------
-    // MILESTONE 1: Starter Wood, Planks & Sticks (Survival Zero Bootstrap)
+    // MILESTONE 1: Fast 3-Log Bootstrap (1 Tree Only -> Instant Planks & Sticks!)
     // -------------------------------------------------------------------------
     if (!this.hasMilestone('M01_WOOD_BOOTSTRAP')) {
       this._currentMilestoneId = 'M01_WOOD_BOOTSTRAP';
-      const logs = this.countInventory('#logs');
-      const planks = this.countInventory('#planks');
-      if (logs + Math.floor(planks / 4) < 6) {
-        await this.gatherWood(6, false);
+      if (this.countInventory('#logs') + Math.floor(this.countInventory('#planks') / 4) < 3) {
+        await this.gatherWood(3, false);
+      }
+
+      if (this.countInventory('#logs') > 0) {
+        await this.craftLogsToPlanksFast(6);
+      }
+      if (this.countInventory('minecraft:stick') < 4 && this.countInventory('#planks') >= 6) {
+        await this.craftSticksFast(4);
+      }
+
+      if (this.countInventory('#planks') >= 7 && this.countInventory('minecraft:stick') >= 2) {
+        this.markMilestoneComplete('M01_WOOD_BOOTSTRAP');
+      } else {
         return { stage: 'M01_WOOD_BOOTSTRAP' };
       }
-
-      if (planks < 16 && logs > 0) {
-        for (const plankName of [
-          'oak_planks',
-          'birch_planks',
-          'spruce_planks',
-          'jungle_planks',
-          'acacia_planks',
-          'dark_oak_planks',
-          'cherry_planks',
-          'mangrove_planks'
-        ]) {
-          if (await this.craftVanillaItem(plankName, 4, false)) break;
-        }
-      }
-
-      if (this.countInventory('minecraft:stick') < 8 && this.countInventory('#planks') >= 4) {
-        await this.craftVanillaItem('stick', 2, false);
-      }
-
-      if (this.countInventory('#planks') >= 8 && this.countInventory('minecraft:stick') >= 4) {
-        this.markMilestoneComplete('M01_WOOD_BOOTSTRAP');
-      }
-      return { stage: 'M01_WOOD_BOOTSTRAP' };
     }
 
     // -------------------------------------------------------------------------
-    // MILESTONE 2: Establish Base Camp, Place Crafting Table & Wooden Pickaxe
+    // MILESTONE 2: Instant Base Camp + Crafting Table -> Rush Stone Pickaxe & Stone Axe!
     // -------------------------------------------------------------------------
     if (!this.getValidStationBlock('craftingTable', 'crafting_table')) {
       this._currentMilestoneId = 'M02_BASE_AND_CRAFTING_TABLE';
       if (this.countInventory('minecraft:crafting_table') === 0) {
         if (this.countInventory('#planks') < 4) {
-          await this.gatherWood(3, false);
-          for (const p of ['oak_planks', 'birch_planks', 'spruce_planks']) {
-            if (await this.craftVanillaItem(p, 2, false)) break;
-          }
-          return { stage: 'M02_BASE_AND_CRAFTING_TABLE' };
+          if (this.countInventory('#logs') === 0) await this.gatherWood(2, false);
+          await this.craftLogsToPlanksFast(4);
         }
         await this.craftVanillaItem('crafting_table', 1, false);
       }
       await this.placeStationAtBase('minecraft:crafting_table', 'craftingTable', { x: 2, y: 0, z: 0 });
-      return { stage: 'M02_BASE_AND_CRAFTING_TABLE' };
     }
 
     if (!this.findInventoryItem('#pickaxe')) {
@@ -1504,37 +1960,64 @@ class AutonomousProgressionEngine extends EventEmitter {
       if (this.countInventory('#cobblestone') >= 3 && this.countInventory('minecraft:stick') >= 2) {
         await this.craftVanillaItem('stone_pickaxe', 1, true);
       } else {
-        if (this.countInventory('#planks') < 3) await this.gatherWood(2, false);
-        if (this.countInventory('minecraft:stick') < 2) await this.craftVanillaItem('stick', 1, false);
+        if (this.countInventory('#planks') < 3) {
+          if (this.countInventory('#logs') === 0) await this.gatherWood(2, false);
+          await this.craftLogsToPlanksFast(3);
+        }
+        if (this.countInventory('minecraft:stick') < 2) await this.craftSticksFast(4);
         await this.craftVanillaItem('wooden_pickaxe', 1, true);
       }
       this.markMilestoneComplete('M02_BASE_AND_CRAFTING_TABLE');
-      return { stage: 'M02_BASE_AND_CRAFTING_TABLE' };
     }
 
     // -------------------------------------------------------------------------
-    // MILESTONE 3: Stone Tools, Furnace & Base Warehouse Chest
+    // MILESTONE 3: Immediate 6-Cobble Stone Tool Upgrade -> Fast Stone-Axe Wood Sweep -> Dual Furnaces
     // -------------------------------------------------------------------------
     if (!this.hasMilestone('M03_STONE_TOOLS_AND_FURNACE')) {
       this._currentMilestoneId = 'M03_STONE_TOOLS_AND_FURNACE';
-      if (this.countInventory('#cobblestone') < 28) {
-        this._log('info', `Mining cobblestone for Stone Tools & Furnace (${this.countInventory('#cobblestone')}/28)...`);
-        await this.gatherSurfaceBlocks(['stone', 'cobblestone', 'deepslate'], '#cobblestone', 28);
+
+      // STEP 3A: Upgrade to Stone Pickaxe + Stone Axe AFTER ONLY 6 COBBLESTONE (4x faster mining immediately!)
+      if (!this.findInventoryItem(['minecraft:stone_pickaxe', '#iron_tier_pickaxe']) || !this.findInventoryItem('#axe')) {
+        if (this.countInventory('#cobblestone') < 6) {
+          this._log('info', 'Quick-mining 6 cobblestone right beside Base Camp for instant Stone Pickaxe & Stone Axe...');
+          await this.gatherSurfaceBlocks(['stone', 'cobblestone', 'deepslate'], '#cobblestone', 6);
+        }
+        if (this.countInventory('minecraft:stick') < 4) {
+          await this.craftSticksFast(8);
+        }
+        if (!this.findInventoryItem(['minecraft:stone_pickaxe', '#iron_tier_pickaxe']) && this.countInventory('#cobblestone') >= 3) {
+          await this.craftVanillaItem('stone_pickaxe', 1, true);
+        }
+        if (!this.findInventoryItem('#axe') && this.countInventory('#cobblestone') >= 3) {
+          await this.craftVanillaItem('stone_axe', 1, true);
+        }
+      }
+
+      // STEP 3B: Now holding a Stone Axe (0.75s/log!), do ONE big wood sweep so we never run out of wood!
+      const totalWoodPlankEquiv = this.countInventory('#planks') + this.countInventory('#logs') * 4;
+      if (totalWoodPlankEquiv < 44 && this.worldState.stations.chests.length === 0) {
+        this._log('info', 'Stone Axe equipped — harvesting full lumber stockpile in one sweep...');
+        await this.gatherWood(12, false);
+        await this.craftLogsToPlanksFast(14);
+        await this.craftSticksFast(12);
+      }
+
+      // STEP 3C: Burst-mine cobblestone with Stone Pickaxe for Dual Parallel Furnaces + Sword!
+      const furnacesOwnedOrPlaced =
+        (this.getValidStationBlock('furnace', 'furnace') ? 1 : 0) +
+        (this.getValidStationBlock('furnaceAux', 'furnace') ? 1 : 0) +
+        this.countInventory('minecraft:furnace');
+      const cobbleNeeded = Math.max(0, (2 - furnacesOwnedOrPlaced) * 8) +
+        (this.findInventoryItem(['minecraft:stone_sword', 'minecraft:iron_sword']) ? 0 : 2);
+
+      if (this.countInventory('#cobblestone') < cobbleNeeded) {
+        this._log('info', `Burst-mining cobblestone with Stone Pickaxe (${this.countInventory('#cobblestone')}/${cobbleNeeded})...`);
+        await this.gatherSurfaceBlocks(['stone', 'cobblestone', 'deepslate'], '#cobblestone', cobbleNeeded);
         return { stage: 'M03_STONE_TOOLS_AND_FURNACE' };
       }
 
-      if (this.countInventory('minecraft:stick') < 8) {
-        if (this.countInventory('#planks') < 4) await this.gatherWood(3, false);
-        await this.craftVanillaItem('stick', 2, false);
-      }
-
-      if (!this.findInventoryItem(['minecraft:stone_pickaxe', '#iron_tier_pickaxe'])) {
-        await this.craftVanillaItem('stone_pickaxe', 1, true);
-      }
-      if (!this.findInventoryItem('#axe')) {
-        await this.craftVanillaItem('stone_axe', 1, true);
-      }
       if (!this.findInventoryItem(['minecraft:stone_sword', 'minecraft:iron_sword'])) {
+        if (this.countInventory('minecraft:stick') < 2) await this.craftSticksFast(4);
         await this.craftVanillaItem('stone_sword', 1, true);
       }
 
@@ -1545,12 +2028,20 @@ class AutonomousProgressionEngine extends EventEmitter {
         await this.placeStationAtBase('minecraft:furnace', 'furnace', { x: 3, y: 0, z: 0 });
       }
 
+      if (!this.getValidStationBlock('furnaceAux', 'furnace') && this.countInventory('#cobblestone') >= 8) {
+        await this.craftVanillaItem('furnace', 1, true);
+        if (this.countInventory('minecraft:furnace') > 0) {
+          await this.placeStationAtBase('minecraft:furnace', 'furnaceAux', { x: 3, y: 0, z: 1 });
+        }
+      }
+
       if (this.worldState.stations.chests.length === 0) {
         if (this.countInventory('minecraft:chest') === 0) {
           if (this.countInventory('#planks') < 8) {
-            await this.gatherWood(3, false);
-            for (const p of ['oak_planks', 'birch_planks', 'spruce_planks']) {
-              if (await this.craftVanillaItem(p, 2, false)) break;
+            if (this.countInventory('#logs') > 0) await this.craftLogsToPlanksFast(4);
+            else {
+              await this.gatherWood(3, false);
+              await this.craftLogsToPlanksFast(3);
             }
           }
           await this.craftVanillaItem('chest', 1, true);
@@ -1567,87 +2058,98 @@ class AutonomousProgressionEngine extends EventEmitter {
     }
 
     // -------------------------------------------------------------------------
-    // MILESTONE 4: Prospect GTCEu Iron & Coal Veins -> Smelt First Iron Ingots
+    // MILESTONE 4 & 5 FAST PIPELINE:
+    // Smelt ONLY the first 5 Iron Ingots + 3 Smooth Stone in Dual Furnaces ->
+    // IMMEDIATELY Place GTL's 1-Tick Blast Furnace -> Instant-Blast Remaining Iron!
     // -------------------------------------------------------------------------
-    if (!this.hasMilestone('M04_PROSPECT_COAL_AND_IRON')) {
-      this._currentMilestoneId = 'M04_PROSPECT_COAL_AND_IRON';
+    if (!this.hasMilestone('M04_PROSPECT_COAL_AND_IRON') || !this.hasMilestone('M05_FAST_BLAST_FURNACE_AND_IRON_KIT')) {
+      this._currentMilestoneId = this.hasMilestone('M04_PROSPECT_COAL_AND_IRON')
+        ? 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT'
+        : 'M04_PROSPECT_COAL_AND_IRON';
+
       if (!(await this.ensureFurnaceFuel(6))) {
-        return { stage: 'M04_PROSPECT_COAL_AND_IRON' };
+        return { stage: this._currentMilestoneId };
       }
 
-      const ironIngots = this.countTotalStock('minecraft:iron_ingot');
-      const rawIron = this.countInventory('#ore:iron');
-      if (ironIngots + rawIron < 14) {
-        await this.prospectAndMineOre('iron', 14 - ironIngots);
-        return { stage: 'M04_PROSPECT_COAL_AND_IRON' };
-      }
+      const hasBlastFurnace = Boolean(this.getValidStationBlock('blastFurnace', 'blast_furnace'));
 
-      if (ironIngots < 12 && rawIron > 0) {
-        this._log('info', `Smelting Iron Ingots (${ironIngots}/12)...`);
-        await this.smeltItemsLive('#ore:iron', Math.min(8, rawIron), true);
-        return { stage: 'M04_PROSPECT_COAL_AND_IRON' };
-      }
-
-      if (this.countTotalStock('minecraft:iron_ingot') >= 12) {
-        this.markMilestoneComplete('M04_PROSPECT_COAL_AND_IRON');
-      }
-      return { stage: 'M04_PROSPECT_COAL_AND_IRON' };
-    }
-
-    // -------------------------------------------------------------------------
-    // MILESTONE 5: GTL 1-Tick Blast Furnace + Iron Pickaxe & Bucket
-    // -------------------------------------------------------------------------
-    if (!this.hasMilestone('M05_FAST_BLAST_FURNACE_AND_IRON_KIT')) {
-      this._currentMilestoneId = 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT';
-
-      if (!this.findInventoryItem('#iron_tier_pickaxe')) {
-        if (this.countInventory('minecraft:stick') < 2) await this.craftVanillaItem('stick', 1, false);
-        await this.craftVanillaItem('iron_pickaxe', 1, true);
-      }
-
-      if (!this.findInventoryItem('minecraft:bucket') && this.countInventory('minecraft:iron_ingot') >= 3) {
-        await this.craftVanillaItem('bucket', 1, true);
-      }
-
-      if (!this.getValidStationBlock('blastFurnace', 'blast_furnace')) {
+      // 1. Rush the 1-Tick `minecraft:blast_furnace` FIRST using just 5 Iron Ingots!
+      if (!hasBlastFurnace) {
         if (this.countInventory('minecraft:blast_furnace') === 0) {
+          if (this.countInventory('minecraft:iron_ingot') < 5) {
+            if (this.countInventory('#ore:iron') < 5 - this.countInventory('minecraft:iron_ingot')) {
+              await this.prospectAndMineOre('iron', 12);
+              return { stage: this._currentMilestoneId };
+            }
+            await this.smeltItemsLive('#ore:iron', 6, false);
+          }
+
           if (this.countInventory('minecraft:smooth_stone') < 3) {
             if (this.countInventory('minecraft:stone') < 3) {
-              if (this.countInventory('minecraft:cobblestone') < 4) {
+              if (this.countInventory('minecraft:cobblestone') < 3) {
                 await this.gatherSurfaceBlocks(['stone', 'cobblestone'], '#cobblestone', 6);
-                return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
+                return { stage: this._currentMilestoneId };
               }
               await this.smeltItemsLive('minecraft:cobblestone', 3, false);
-              return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
             }
-            await this.smeltItemsLive('minecraft:stone', 3, false);
-            return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
+            if (this.countInventory('minecraft:stone') >= 3) {
+              await this.smeltItemsLive('minecraft:stone', 3, false);
+            }
           }
+
           if (this.countInventory('minecraft:furnace') === 0) {
             if (this.countInventory('#cobblestone') < 8) {
               await this.gatherSurfaceBlocks(['stone', 'cobblestone'], '#cobblestone', 8);
-              return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
+              return { stage: this._currentMilestoneId };
             }
             await this.craftVanillaItem('furnace', 1, true);
           }
-          if (this.countInventory('minecraft:iron_ingot') < 5) {
-            if (this.countInventory('#ore:iron') < 5) {
-              await this.prospectAndMineOre('iron', 6);
-              return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
-            }
-            await this.smeltItemsLive('#ore:iron', 5, false);
-            return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
+
+          if (
+            this.countInventory('minecraft:iron_ingot') >= 5 &&
+            this.countInventory('minecraft:smooth_stone') >= 3 &&
+            this.countInventory('minecraft:furnace') >= 1
+          ) {
+            await this.craftVanillaItem('blast_furnace', 1, true);
+          } else {
+            return { stage: this._currentMilestoneId };
           }
-          await this.craftVanillaItem('blast_furnace', 1, true);
         }
 
         if (this.countInventory('minecraft:blast_furnace') > 0) {
           await this.placeStationAtBase('minecraft:blast_furnace', 'blastFurnace', { x: 4, y: 0, z: 0 });
-          this._log('info', 'Placed GTL 1-Tick Blast Furnace at Base Camp — instant ore/wrought-iron/bronze/firebrick smelting unlocked!');
+          this._log(
+            'info',
+            'Placed GTL 1-Tick Blast Furnace after just 5 Iron — 0.05s instant blasting now active for all ores!'
+          );
         }
       }
 
-      if (this.getValidStationBlock('blastFurnace', 'blast_furnace')) {
+      // 2. Now that the 1-Tick Blast Furnace is active, instant-blast 12+ Iron Ingots + craft Iron Pickaxe & Bucket!
+      const ironStock = this.countTotalStock('minecraft:iron_ingot');
+      const rawIron = this.countInventory('#ore:iron');
+      if (ironStock < 12) {
+        if (ironStock + rawIron < 12) {
+          await this.prospectAndMineOre('iron', 12 - ironStock);
+          return { stage: 'M04_PROSPECT_COAL_AND_IRON' };
+        }
+        await this.smeltItemsLive('#ore:iron', Math.min(12, rawIron), true);
+      }
+
+      if (this.countTotalStock('minecraft:iron_ingot') >= 6 && !this.hasMilestone('M04_PROSPECT_COAL_AND_IRON')) {
+        this.markMilestoneComplete('M04_PROSPECT_COAL_AND_IRON');
+      }
+
+      if (!this.findInventoryItem('#iron_tier_pickaxe') && this.countInventory('minecraft:iron_ingot') >= 3) {
+        if (this.countInventory('minecraft:stick') < 2) await this.craftSticksFast(4);
+        await this.craftVanillaItem('iron_pickaxe', 1, true);
+      }
+      if (!this.findInventoryItem('minecraft:bucket') && this.countInventory('minecraft:iron_ingot') >= 3) {
+        await this.craftVanillaItem('bucket', 1, true);
+      }
+
+      if (this.getValidStationBlock('blastFurnace', 'blast_furnace') && this.findInventoryItem('#iron_tier_pickaxe')) {
+        this.markMilestoneComplete('M04_PROSPECT_COAL_AND_IRON');
         this.markMilestoneComplete('M05_FAST_BLAST_FURNACE_AND_IRON_KIT');
       }
       return { stage: 'M05_FAST_BLAST_FURNACE_AND_IRON_KIT' };
@@ -1678,67 +2180,65 @@ class AutonomousProgressionEngine extends EventEmitter {
         return { stage: 'M06_GTCEU_HAND_TOOLS' };
       }
 
-      if (this.countInventory('minecraft:stick') < 4) {
-        if (this.countInventory('#planks') < 4) await this.ensureFurnaceFuel(4);
-        await this.craftVanillaItem('stick', 2, false);
-      }
-
-      // 1. GTCEu Iron Hammer: [I I _] / [I I S] / [I I _]
-      if (!hasHammer) {
-        this._log('info', 'Crafting GTCEu Iron Hammer on Crafting Table...');
-        await this.craftShapedLive([
-          ['minecraft:iron_ingot', 'minecraft:iron_ingot', null],
-          ['minecraft:iron_ingot', 'minecraft:iron_ingot', 'minecraft:stick'],
-          ['minecraft:iron_ingot', 'minecraft:iron_ingot', null]
-        ]);
-      }
-
-      // 2. GTCEu Iron Mortar: [_ I _] / [S I S] / [S S S] (Stone + Iron Ingot)
-      if (!hasMortar) {
-        if (this.countInventory('minecraft:stone') < 5) {
-          if (this.countInventory('minecraft:cobblestone') < 5) {
-            await this.gatherSurfaceBlocks(['stone', 'cobblestone'], '#cobblestone', 6);
-            return { stage: 'M06_GTCEU_HAND_TOOLS' };
-          }
-          await this.smeltItemsLive('minecraft:cobblestone', 5, false);
+      if (!hasMortar && this.countInventory('minecraft:stone') < 5) {
+        if (this.countInventory('minecraft:cobblestone') < 5) {
+          await this.gatherSurfaceBlocks(['stone', 'cobblestone'], '#cobblestone', 6);
           return { stage: 'M06_GTCEU_HAND_TOOLS' };
         }
-        await this.craftShapedLive([
-          [null, 'minecraft:iron_ingot', null],
-          ['minecraft:stone', 'minecraft:iron_ingot', 'minecraft:stone'],
-          ['minecraft:stone', 'minecraft:stone', 'minecraft:stone']
-        ]);
+        await this.smeltItemsLive('minecraft:cobblestone', 5, false);
+        return { stage: 'M06_GTCEU_HAND_TOOLS' };
       }
 
-      // 3. Hammer Iron Plates (`2x iron_ingot` + Hammer -> `1x gtceu:iron_plate`) for Wrench & File!
-      if (this.findInventoryItem('#gtceu:hammer') && morePlates > 0) {
-        await this.craftShapedLive(
-          [
-            ['#gtceu:hammer', null, null],
-            ['minecraft:iron_ingot', null, null],
-            ['minecraft:iron_ingot', null, null]
-          ],
-          morePlates
-        );
+      if (this.countInventory('minecraft:stick') < 4) {
+        await this.craftSticksFast(6);
       }
 
-      // 4. GTCEu Iron Wrench: [P H P] / [P P P] / [_ P _]
-      if (!hasWrench && this.countInventory('gtceu:iron_plate') >= 6) {
-        await this.craftShapedLive([
-          ['gtceu:iron_plate', '#gtceu:hammer', 'gtceu:iron_plate'],
-          ['gtceu:iron_plate', 'gtceu:iron_plate', 'gtceu:iron_plate'],
-          [null, 'gtceu:iron_plate', null]
-        ]);
-      }
+      // Open Crafting Table ONCE and forge Hammer + Mortar + Plates + Wrench + File back-to-back!
+      await this.withCraftingTableSession(async () => {
+        if (!hasHammer) {
+          this._log('info', 'Forging GTCEu hand tool kit (Hammer, Mortar, Plates, Wrench, File) in one Table session...');
+          await this.craftShapedLive([
+            ['minecraft:iron_ingot', 'minecraft:iron_ingot', null],
+            ['minecraft:iron_ingot', 'minecraft:iron_ingot', 'minecraft:stick'],
+            ['minecraft:iron_ingot', 'minecraft:iron_ingot', null]
+          ]);
+        }
 
-      // 5. GTCEu Iron File: [P _ _] / [P _ _] / [S _ _]
-      if (!hasFile && this.countInventory('gtceu:iron_plate') >= 2) {
-        await this.craftShapedLive([
-          ['gtceu:iron_plate', null, null],
-          ['gtceu:iron_plate', null, null],
-          ['minecraft:stick', null, null]
-        ]);
-      }
+        if (!hasMortar && this.countInventory('minecraft:stone') >= 5) {
+          await this.craftShapedLive([
+            [null, 'minecraft:iron_ingot', null],
+            ['minecraft:stone', 'minecraft:iron_ingot', 'minecraft:stone'],
+            ['minecraft:stone', 'minecraft:stone', 'minecraft:stone']
+          ]);
+        }
+
+        if (this.findInventoryItem('#gtceu:hammer') && morePlates > 0) {
+          await this.craftShapedLive(
+            [
+              ['#gtceu:hammer', null, null],
+              ['minecraft:iron_ingot', null, null],
+              ['minecraft:iron_ingot', null, null]
+            ],
+            morePlates
+          );
+        }
+
+        if (!hasWrench && this.countInventory('gtceu:iron_plate') >= 6) {
+          await this.craftShapedLive([
+            ['gtceu:iron_plate', '#gtceu:hammer', 'gtceu:iron_plate'],
+            ['gtceu:iron_plate', 'gtceu:iron_plate', 'gtceu:iron_plate'],
+            [null, 'gtceu:iron_plate', null]
+          ]);
+        }
+
+        if (!hasFile && this.countInventory('gtceu:iron_plate') >= 2) {
+          await this.craftShapedLive([
+            ['gtceu:iron_plate', null, null],
+            ['gtceu:iron_plate', null, null],
+            ['minecraft:stick', null, null]
+          ]);
+        }
+      });
 
       if (
         this.findInventoryItem('#gtceu:hammer') &&
@@ -1787,36 +2287,38 @@ class AutonomousProgressionEngine extends EventEmitter {
         await this.smeltItemsLive('#ore:tin', 3, true);
       }
 
-      // Grind Copper & Tin Ingots with Mortar -> Bronze Dust -> 1-Tick Blast Furnace -> Bronze Ingot!
-      const copIngots = this.countInventory('minecraft:copper_ingot');
-      if (copIngots >= 3 && this.countInventory('gtceu:copper_dust') < 9) {
-        await this.craftShapedLive(
-          [['#gtceu:mortar', 'minecraft:copper_ingot', null]],
-          Math.min(9, copIngots)
-        );
-      }
-      const tinIngots = this.countInventory('gtceu:tin_ingot');
-      if (tinIngots >= 1 && this.countInventory('gtceu:tin_dust') < 3) {
-        await this.craftShapedLive(
-          [['#gtceu:mortar', 'gtceu:tin_ingot', null]],
-          Math.min(3, tinIngots)
-        );
-      }
+      // Grind Copper & Tin Ingots + mix Bronze Dust inside ONE shared Crafting Table session!
+      await this.withCraftingTableSession(async () => {
+        const copIngots = this.countInventory('minecraft:copper_ingot');
+        if (copIngots >= 3 && this.countInventory('gtceu:copper_dust') < 9) {
+          await this.craftShapedLive(
+            [['#gtceu:mortar', 'minecraft:copper_ingot', null]],
+            Math.min(9, copIngots)
+          );
+        }
+        const tinIngots = this.countInventory('gtceu:tin_ingot');
+        if (tinIngots >= 1 && this.countInventory('gtceu:tin_dust') < 3) {
+          await this.craftShapedLive(
+            [['#gtceu:mortar', 'gtceu:tin_ingot', null]],
+            Math.min(3, tinIngots)
+          );
+        }
 
-      const batches = Math.min(
-        Math.floor(this.countInventory('gtceu:copper_dust') / 3),
-        this.countInventory('gtceu:tin_dust')
-      );
-      if (batches > 0) {
-        await this.craftShapedLive(
-          [
-            ['gtceu:copper_dust', 'gtceu:copper_dust', 'gtceu:copper_dust'],
-            ['gtceu:tin_dust', null, null],
-            [null, null, null]
-          ],
-          batches
+        const batches = Math.min(
+          Math.floor(this.countInventory('gtceu:copper_dust') / 3),
+          this.countInventory('gtceu:tin_dust')
         );
-      }
+        if (batches > 0) {
+          await this.craftShapedLive(
+            [
+              ['gtceu:copper_dust', 'gtceu:copper_dust', 'gtceu:copper_dust'],
+              ['gtceu:tin_dust', null, null],
+              [null, null, null]
+            ],
+            batches
+          );
+        }
+      });
 
       if (this.countInventory('gtceu:bronze_dust') > 0) {
         await this.smeltItemsLive('gtceu:bronze_dust', 12, true);

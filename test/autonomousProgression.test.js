@@ -244,9 +244,26 @@ function createInteractiveSurvivalWorldHarness() {
     }
   };
 
-  bot.dig = async (block) => {
+  const metrics = {
+    totalDigs: 0,
+    forceLookTrueDigs: 0,
+    bareHandLogDigs: 0,
+    woodenPickCobbleDigs: 0,
+    openBlockCalls: 0
+  };
+
+  bot.dig = async (block, forceLook) => {
     const blk = bot.blockAt(block.position);
     if (!blk || blk.type === 0) return;
+    metrics.totalDigs += 1;
+    if (forceLook === true) metrics.forceLookTrueDigs += 1;
+    const heldName = String(bot.heldItem?.name || '');
+    if (blk.name === 'oak_log' && !heldName.includes('axe')) {
+      metrics.bareHandLogDigs += 1;
+    }
+    if ((blk.name === 'stone' || blk.name === 'cobblestone') && heldName === 'wooden_pickaxe') {
+      metrics.woodenPickCobbleDigs += 1;
+    }
     setBlock(blk.position.x, blk.position.y, blk.position.z, 'air');
     if (blk.name === 'oak_log') addItem('minecraft:oak_log', 1);
     else if (blk.name === 'stone' || blk.name === 'cobblestone') addItem('minecraft:cobblestone', 1);
@@ -476,6 +493,7 @@ function createInteractiveSurvivalWorldHarness() {
   };
 
   bot.openBlock = async () => {
+    metrics.openBlockCalls += 1;
     activeCraftWindow = buildCraftWindow(9);
     return activeCraftWindow;
   };
@@ -587,6 +605,7 @@ function createInteractiveSurvivalWorldHarness() {
     voxels,
     invStacks,
     addItem,
+    metrics,
     deprecationWarnings,
     bindRegistryBridge: (rb) => {
       registryBridgeRef = rb;
@@ -649,7 +668,7 @@ test('AutonomousProgressionEngine self-care eats food when hungry and evades nea
 });
 
 test('AutonomousProgressionEngine plays from empty-handed spawn through Wood -> Base -> 1-Tick Blast Furnace -> GTCEu Tools -> Modded Vein Prospecting -> Bronze & Steam -> PBF -> MV/HV Quest Frontier', async () => {
-  const { bot, addItem, bindRegistryBridge, deprecationWarnings } =
+  const { bot, addItem, metrics, bindRegistryBridge, deprecationWarnings } =
     createInteractiveSurvivalWorldHarness();
 
   const agent = new GTLAutomationAgent({
@@ -697,10 +716,35 @@ test('AutonomousProgressionEngine plays from empty-handed spawn through Wood -> 
   assert.equal(engine.getInventoryItems().length, 0, 'Starts completely empty-handed');
 
   // Run autonomous cycles continuously — no commands issued!
+  let cyclesUsed = 0;
   for (let cycle = 0; cycle < 65; cycle++) {
+    cyclesUsed += 1;
     await engine.runSingleCycle();
     if (completedMilestones.includes('M09_PRIMITIVE_BLAST_FURNACE')) break;
   }
+
+  // Verify real survival speedrunner guarantees:
+  assert.equal(
+    metrics.forceLookTrueDigs,
+    metrics.totalDigs,
+    'Every single dig must pass forceLook=true (0ms instant camera snap)'
+  );
+  assert.ok(
+    metrics.bareHandLogDigs <= 4,
+    `Expected <= 4 bare-handed log punches before crafting Stone Axe, got ${metrics.bareHandLogDigs}`
+  );
+  assert.ok(
+    metrics.woodenPickCobbleDigs <= 7,
+    `Expected <= 7 wooden-pickaxe stone digs before immediate Stone Pickaxe upgrade, got ${metrics.woodenPickCobbleDigs}`
+  );
+  assert.ok(
+    engine.getValidStationBlock('furnaceAux', 'furnace'),
+    'Expected Dual Parallel Furnace bank placed at Base Camp'
+  );
+  assert.ok(
+    cyclesUsed <= 25,
+    `Expected all 9 milestones to finish in <= 25 high-speed chained cycles, took ${cyclesUsed}`
+  );
 
   // Verify real survival progression milestones completed autonomously:
   assert.ok(completedMilestones.includes('M01_WOOD_BOOTSTRAP'), 'Completed wood bootstrap');
