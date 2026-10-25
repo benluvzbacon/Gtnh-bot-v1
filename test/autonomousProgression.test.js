@@ -1132,4 +1132,231 @@ test('guardWindowSlot0Listeners unblocks real Mineflayer promise_utils.once(wind
   agent.shutdown();
 });
 
+test('Bot never mines stone without a pickaxe in hand (M02 gate, hill station placement, hotbar slot 44, pathfinder dirt-swap recovery, and navigator stone penalty)', async () => {
+  const { GTNHNavigator } = require('../src/navigation/gtnhNavigator');
+
+  const bot = new EventEmitter();
+  bot.version = '1.20.1';
+  bot.QUICK_BAR_START = 36;
+  bot.quickBarSlot = null; // Reproduces fresh spawn before any setQuickBarSlot!
+  bot.heldItem = null;
+  bot.health = 20;
+  bot.food = 20;
+  bot.oxygenLevel = 20;
+  bot.entities = {};
+  bot.entity = {
+    position: new Vec3(0.5, 64, 0.5),
+    velocity: new Vec3(0, 0, 0),
+    isInWater: false,
+    onGround: true
+  };
+
+  const slots = new Array(46).fill(null);
+  const syncHeld = () => {
+    bot.heldItem = typeof bot.quickBarSlot === 'number' ? slots[36 + bot.quickBarSlot] || null : null;
+  };
+  bot.setQuickBarSlot = (slotIdx) => {
+    bot.quickBarSlot = slotIdx;
+    syncHeld();
+  };
+  bot.inventory = {
+    inventoryStart: 9,
+    inventoryEnd: 45,
+    slots,
+    items: () => slots.slice(9, 45).filter(Boolean)
+  };
+  bot.equip = async (item, dest) => {
+    if (dest === 'hand') {
+      if (item.slot >= 36 && item.slot <= 44) {
+        bot.setQuickBarSlot(item.slot - 36);
+      } else {
+        const prev = slots[36];
+        slots[36] = { ...item, slot: 36 };
+        slots[item.slot] = prev ? { ...prev, slot: item.slot } : null;
+        bot.setQuickBarSlot(0);
+      }
+    }
+  };
+
+  // Simulate `mineflayer-tool` unequipping hand on digTime ties (the exact bug in mineflayer-tool!)
+  bot.tool = {
+    equipForBlock: async () => {
+      slots[36 + (bot.quickBarSlot ?? 0)] = slots[36 + (bot.quickBarSlot ?? 0)];
+      bot.heldItem = null;
+    }
+  };
+
+  // World map with a 1-block dirt hill at (2, 64, 0) where Crafting Table prefers to go,
+  // and exposed `stone` blocks at (8..10, 64, 0)
+  const worldBlocks = new Map();
+  const keyOf = (x, y, z) => `${x},${y},${z}`;
+  for (let x = -12; x <= 14; x++) {
+    for (let z = -12; z <= 14; z++) {
+      worldBlocks.set(keyOf(x, 63, z), {
+        name: 'grass_block',
+        type: 2,
+        stateId: 9,
+        boundingBox: 'block',
+        position: new Vec3(x, 63, z)
+      });
+    }
+  }
+  // 1-block dirt bump right at (2, 64, 0)
+  worldBlocks.set(keyOf(2, 64, 0), {
+    name: 'dirt',
+    type: 3,
+    stateId: 10,
+    boundingBox: 'block',
+    position: new Vec3(2, 64, 0)
+  });
+  for (let sx = 8; sx <= 10; sx++) {
+    worldBlocks.set(keyOf(sx, 64, 0), {
+      name: 'stone',
+      type: 1,
+      stateId: 1,
+      boundingBox: 'block',
+      position: new Vec3(sx, 64, 0)
+    });
+  }
+
+  bot.registry = require('prismarine-registry')('1.20.1');
+  const stoneId = bot.registry.blocksByName.stone.id;
+  const grassId = bot.registry.blocksByName.grass_block.id;
+  const dirtId = bot.registry.blocksByName.dirt.id;
+  const tableId = bot.registry.blocksByName.crafting_table.id;
+  const woodPickId = bot.registry.itemsByName.wooden_pickaxe.id;
+  const cobbleId = bot.registry.itemsByName.cobblestone.id;
+  for (const blk of worldBlocks.values()) {
+    if (blk.name === 'stone') blk.type = stoneId;
+    if (blk.name === 'grass_block') blk.type = grassId;
+    if (blk.name === 'dirt') blk.type = dirtId;
+  }
+
+  bot.blockAt = (pos) => {
+    const p = pos.floored();
+    return (
+      worldBlocks.get(keyOf(p.x, p.y, p.z)) || {
+        name: 'air',
+        type: 0,
+        stateId: 0,
+        boundingBox: 'empty',
+        position: p
+      }
+    );
+  };
+  bot.findBlocks = ({ matching }) => {
+    const ids = Array.isArray(matching) ? matching : [matching];
+    const out = [];
+    for (const blk of worldBlocks.values()) {
+      if (ids.includes(blk.type)) out.push(blk.position.clone());
+    }
+    return out;
+  };
+
+  let allowWorldPlace = false;
+  bot.placeBlock = async (refBlock, faceVec) => {
+    if (!allowWorldPlace || !bot.heldItem) return;
+    const dest = refBlock.position.plus(faceVec).floored();
+    worldBlocks.set(keyOf(dest.x, dest.y, dest.z), {
+      name: bot.heldItem.name,
+      type: bot.heldItem.type,
+      stateId: 58,
+      boundingBox: 'block',
+      position: dest
+    });
+    const s = bot.heldItem.slot;
+    slots[s] = null;
+    syncHeld();
+  };
+
+  const stoneDigTools = [];
+  bot.dig = async (blk) => {
+    if (blk.name === 'stone') {
+      stoneDigTools.push(bot.heldItem ? bot.heldItem.name : 'EMPTY_HAND');
+      worldBlocks.delete(keyOf(blk.position.x, blk.position.y, blk.position.z));
+      // Deposit cobblestone into slot 12
+      slots[12] = {
+        type: cobbleId,
+        name: 'cobblestone',
+        count: (slots[12]?.count || 0) + 1,
+        slot: 12
+      };
+    }
+  };
+
+  // Simulate `mineflayer-pathfinder` equipping `dirt` (slot 37) during `goto`!
+  bot.pathfinder = {
+    thinkTimeout: 5000,
+    setMovements() {},
+    setGoal() {},
+    stop() {},
+    isMoving: () => false,
+    goto: async (goal) => {
+      if (typeof goal?.x === 'number' && typeof goal?.z === 'number') {
+        bot.entity.position = new Vec3(goal.x - 1, goal.y ?? 64, goal.z);
+      }
+      if (slots[37]?.name === 'dirt') {
+        bot.setQuickBarSlot(1); // pathfinder leaves dirt in hand!
+      }
+    }
+  };
+  const nav = new GTNHNavigator(bot);
+
+  const engine = new AutonomousProgressionEngine({
+    bot,
+    navigator: nav,
+    options: {
+      persistState: false,
+      actionDelayScale: 0
+    }
+  });
+  engine.markMilestoneComplete('M01_WOOD_BOOTSTRAP');
+
+  // 1. Without a pickaxe, GTNHNavigator forbids pathfinder from tunneling through stone (`penalty = 1000`),
+  //    AND `digAndCollectBlock(stone)` refuses to swing bare-handed!
+  const stoneAt8 = bot.blockAt(new Vec3(8, 64, 0));
+  assert.equal(nav.evaluateBreakPenalty(stoneAt8), 1000, 'Navigator must forbid breaking stone without a pickaxe');
+  const bareDig = await engine.digAndCollectBlock(stoneAt8);
+  assert.equal(bareDig, false, 'digAndCollectBlock must refuse to punch stone bare-handed');
+  assert.equal(stoneDigTools.length, 0, 'Zero bare-handed stone dig attempts allowed');
+  bot.entity.position = new Vec3(0.5, 64, 0.5);
+
+  // 2. When Crafting Table placement fails on server (`allowWorldPlace = false`), `placeStationAtBase`
+  //    must NOT save fake station coords AND `runSingleCycle()` must stay in `M02_BASE_AND_CRAFTING_TABLE`!
+  slots[36] = { type: tableId, name: 'crafting_table', count: 1, slot: 36 };
+  slots[37] = { type: dirtId, name: 'dirt', count: 16, slot: 37 };
+  const cycleFailPlace = await engine.runSingleCycle();
+  assert.equal(cycleFailPlace.stage, 'M02_BASE_AND_CRAFTING_TABLE');
+  assert.equal(engine.worldState.stations.craftingTable, null, 'Unverified placement must not save station coords');
+  assert.equal(stoneDigTools.length, 0, 'M02 must never fall through to M03 stone mining without a pickaxe');
+
+  // 3. Now allow world placement: `placeStationAtBase` adapts to the 1-block dirt hill `(2, 65, 0)`!
+  allowWorldPlace = true;
+  const placedTable = await engine.placeStationAtBase('minecraft:crafting_table', 'craftingTable', {
+    x: 2,
+    y: 0,
+    z: 0
+  });
+  assert.ok(placedTable, 'placeStationAtBase should adapt to 1-block slope at (2, 65, 0)');
+  assert.deepEqual(engine.worldState.stations.craftingTable, { x: 2, y: 65, z: 0 });
+
+  // 4. Deposit crafted `wooden_pickaxe` into hotbar `slot 44` (where shift-clicking slot 0 places it!)
+  //    while `quickBarSlot` is currently holding `dirt` (`slot 37`), then mine stone!
+  slots[44] = { type: woodPickId, name: 'wooden_pickaxe', count: 1, slot: 44 };
+  assert.equal(nav.evaluateBreakPenalty(stoneAt8), 0, 'Navigator allows stone break once pickaxe is in inventory');
+
+  await engine.gatherSurfaceBlocks(['stone'], '#cobblestone', 3);
+  assert.equal(stoneDigTools.length, 3, 'Should mine all 3 stone blocks');
+  for (const usedTool of stoneDigTools) {
+    assert.equal(
+      usedTool,
+      'wooden_pickaxe',
+      'Every single stone block MUST be mined with wooden_pickaxe in hand even after pathfinder swapped to dirt!'
+    );
+  }
+  assert.equal(bot.quickBarSlot, 8, 'Hotbar slot 8 (window slot 44) should be selected');
+  assert.equal(bot.heldItem?.name, 'wooden_pickaxe');
+});
+
+
 

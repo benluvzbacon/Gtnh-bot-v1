@@ -301,13 +301,19 @@ class GTLAutomationAgent extends EventEmitter {
       });
     }
 
-    if (typeof bot.loadPlugin === 'function' && bot.registry) {
-      try {
-        bot.loadPlugin(toolPlugin);
-        bot.loadPlugin(collectBlockPlugin);
-      } catch (_) {
-        // Safe fallback for minimal/mock bot harnesses
+    const loadAuxPlugins = () => {
+      if (typeof bot.loadPlugin === 'function' && bot.registry) {
+        try {
+          if (!bot.tool) bot.loadPlugin(toolPlugin);
+          if (!bot.collectBlock) bot.loadPlugin(collectBlockPlugin);
+        } catch (_) {
+          // Safe fallback for minimal/mock bot harnesses
+        }
       }
+    };
+    loadAuxPlugins();
+    if (typeof bot.once === 'function') {
+      bot.once('inject_allowed', loadAuxPlugins);
     }
 
     this.navigator = new GTNHNavigator(bot, options.navigatorOptions || {});

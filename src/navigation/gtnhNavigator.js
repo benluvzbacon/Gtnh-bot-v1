@@ -502,6 +502,16 @@ class GTNHNavigator extends EventEmitter {
     return penalty;
   }
 
+  _botHasPickaxeInInventory() {
+    const items =
+      typeof this.bot?.inventory?.items === 'function' ? this.bot.inventory.items() : [];
+    for (const item of items) {
+      const n = String(item?.name || '').toLowerCase();
+      if (n.includes('pickaxe')) return true;
+    }
+    return false;
+  }
+
   evaluateBreakPenalty(block) {
     if (!block || !block.position) return 0;
     const pos = block.position;
@@ -510,6 +520,26 @@ class GTNHNavigator extends EventEmitter {
       if (isInsideAABB(pos, struct.min, struct.max)) {
         return 1000;
       }
+    }
+
+    const bName = String(block.name || '').toLowerCase().replace(/^minecraft:/, '');
+    const needsPickaxe =
+      bName === 'stone' ||
+      bName === 'cobblestone' ||
+      bName === 'deepslate' ||
+      bName === 'cobbled_deepslate' ||
+      bName === 'granite' ||
+      bName === 'diorite' ||
+      bName === 'andesite' ||
+      bName === 'tuff' ||
+      bName === 'calcite' ||
+      bName === 'dripstone_block' ||
+      bName === 'blackstone' ||
+      bName === 'basalt' ||
+      bName.endsWith('_ore');
+
+    if (needsPickaxe && !this._botHasPickaxeInInventory()) {
+      return 1000;
     }
 
     if (this.hasAdjacentLava(pos)) {

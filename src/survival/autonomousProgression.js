@@ -257,12 +257,20 @@ class AutonomousProgressionEngine extends EventEmitter {
   }) {
     super();
     this.bot = bot;
-    installFastWindowClickShim(this.bot, { slot0TimeoutMs: options.slot0TimeoutMs ?? 80 });
+    this.slot0TimeoutMs = options.slot0TimeoutMs ?? 140;
+    installFastWindowClickShim(this.bot, { slot0TimeoutMs: this.slot0TimeoutMs });
     this.navigator = navigator;
     this.craftingEngine = craftingEngine;
     this.multiblockBuilder = multiblockBuilder;
     this.hazardMonitor = hazardMonitor;
-    this.registryBridge = registryBridge;
+    this.registryBridge =
+      registryBridge || {
+        toCanonicalItemId: (item) => {
+          const raw = String(item?.name || '');
+          if (!raw) return '';
+          return raw.includes(':') ? raw : `minecraft:${raw}`;
+        }
+      };
 
     this.stateFilePath =
       options.stateFilePath ??
@@ -443,13 +451,13 @@ class AutonomousProgressionEngine extends EventEmitter {
     this._needsBodyReconcile = false;
     if (!this.bot) return;
 
-    installFastWindowClickShim(this.bot, { slot0TimeoutMs: 80 });
+    installFastWindowClickShim(this.bot, { slot0TimeoutMs: this.slot0TimeoutMs });
 
     // 1. Force an authoritative `window_items` sync from the 1.20.1 server (in case `window_items(0)`
     // arrived over 127.0.0.1 before Mineflayer's `setTimeout(inject_allowed, 0)`), then sweep any
     // leftover 2x2 inventory crafting grid / cursor items persisted on the player body!
     if (this.bot.inventory) {
-      guardWindowSlot0Listeners(this.bot.inventory, 80);
+      guardWindowSlot0Listeners(this.bot.inventory, this.slot0TimeoutMs);
       await this._syncWindowSafe(this.bot.inventory, 300);
       if (typeof this.bot.clickWindow === 'function') {
         await this._ensureCleanCraftingGrid(this.bot.inventory, 4);
@@ -729,53 +737,192 @@ class AutonomousProgressionEngine extends EventEmitter {
     return null;
   }
 
+  getHeldItem() {
+    return this.bot?.heldItem || null;
+  }
+
+  getHeldCanonicalId() {
+    const held = this.getHeldItem();
+    return held ? this.registryBridge.toCanonicalItemId(held) : '';
+  }
+
   async equipItemSpec(spec, destination = 'hand') {
-    const item = this.findInventoryItem(spec);
-    if (!item || typeof this.bot?.equip !== 'function') return false;
+    if (!this.bot) return false;
+    if (destination === 'hand') {
+      const heldId = this.getHeldCanonicalId();
+      if (heldId && matchesItemSpec(heldId, spec)) {
+        return true;
+      }
+      if (this.bot.quickBarSlot == null && typeof this.bot.setQuickBarSlot === 'function') {
+        try {
+          this.bot.setQuickBarSlot(0);
+        } catch (_) {
+          // Safe fallback
+        }
+      }
+    }
+
+    let item = this.findInventoryItem(spec);
+    if (!item) return false;
+
+    const qbStart = this.bot.QUICK_BAR_START ?? 36;
+    if (
+      destination === 'hand' &&
+      typeof item.slot === 'number' &&
+      item.slot >= qbStart &&
+      item.slot < qbStart + 9 &&
+      typeof this.bot.setQuickBarSlot === 'function'
+    ) {
+      try {
+        this.bot.setQuickBarSlot(item.slot - qbStart);
+        if (matchesItemSpec(this.getHeldCanonicalId(), spec)) {
+          return true;
+        }
+      } catch (_) {
+        // Fall through to bot.equip
+      }
+    }
+
+    if (typeof this.bot.equip !== 'function') return false;
     try {
       await this.bot.equip(item, destination);
-      return true;
     } catch (_) {
-      return false;
+      // Retry once after syncing inventory window in case slot index shifted on server
+      if (this.bot.inventory) {
+        await this._syncWindowSafe(this.bot.inventory, 150);
+      }
+      item = this.findInventoryItem(spec);
+      if (!item) return false;
+      try {
+        await this.bot.equip(item, destination);
+      } catch (_2) {
+        return false;
+      }
     }
+
+    if (destination === 'hand') {
+      const afterHeld = this.getHeldCanonicalId();
+      if (afterHeld && matchesItemSpec(afterHeld, spec)) {
+        return true;
+      }
+      // If `bot.equip` moved the stack onto hotbar without updating `heldItem` in a mock/custom harness,
+      // check hotbar slots directly and select it
+      const fresh = this.findInventoryItem(spec);
+      if (
+        fresh &&
+        typeof fresh.slot === 'number' &&
+        fresh.slot >= qbStart &&
+        fresh.slot < qbStart + 9 &&
+        typeof this.bot.setQuickBarSlot === 'function'
+      ) {
+        try {
+          this.bot.setQuickBarSlot(fresh.slot - qbStart);
+        } catch (_) {
+          // Ignore
+        }
+      }
+      return Boolean(!this.bot._client || matchesItemSpec(this.getHeldCanonicalId(), spec));
+    }
+    return true;
+  }
+
+  _blockRequiresPickaxe(block) {
+    if (!block) return false;
+    if (typeof block.stateId === 'number' && block.stateId > this.vanillaMaxStateId) {
+      const modName = String(block.name || '').toLowerCase();
+      if (!modName.includes('log') && !modName.includes('leaves') && !modName.includes('planks')) {
+        return true;
+      }
+    }
+    const clean = String(block.name || '').toLowerCase().replace(/^minecraft:/, '');
+    return (
+      STONE_HOST_BLOCKS.has(clean) ||
+      clean === 'cobblestone' ||
+      clean === 'cobbled_deepslate' ||
+      clean === 'calcite' ||
+      clean === 'dripstone_block' ||
+      clean === 'blackstone' ||
+      clean === 'basalt' ||
+      clean === 'obsidian' ||
+      clean === 'netherrack' ||
+      clean === 'furnace' ||
+      clean === 'blast_furnace' ||
+      clean === 'smoker' ||
+      clean.endsWith('_ore') ||
+      clean.includes('bricks')
+    );
   }
 
   async equipBestToolForBlock(block) {
-    if (!block || !this.bot) return;
-    if (this.bot.tool && typeof this.bot.tool.equipForBlock === 'function') {
-      try {
-        await this.bot.tool.equipForBlock(block, {});
-        return;
-      } catch (_) {
-        // Fall through to explicit tier selector
+    if (!block || !this.bot) return false;
+
+    const name = String(block.name || '').toLowerCase().replace(/^minecraft:/, '');
+    if (
+      name.includes('log') ||
+      name.includes('stem') ||
+      name.includes('planks') ||
+      name === 'crafting_table' ||
+      name === 'chest'
+    ) {
+      for (const axe of [
+        'minecraft:diamond_axe',
+        'minecraft:iron_axe',
+        'minecraft:stone_axe',
+        'minecraft:wooden_axe',
+        '#axe'
+      ]) {
+        if (await this.equipItemSpec(axe, 'hand')) return true;
       }
+      return false;
     }
 
-    const name = String(block.name || '').toLowerCase();
-    if (name.includes('log') || name.includes('planks') || name === 'crafting_table' || name === 'chest') {
-      for (const axe of ['minecraft:iron_axe', 'minecraft:stone_axe', 'minecraft:wooden_axe']) {
-        if (await this.equipItemSpec(axe)) return;
-      }
-    } else if (
+    if (
       name === 'dirt' ||
       name === 'grass_block' ||
+      name === 'coarse_dirt' ||
+      name === 'podzol' ||
       name === 'sand' ||
+      name === 'red_sand' ||
       name === 'gravel' ||
       name === 'clay'
     ) {
-      for (const shovel of ['minecraft:iron_shovel', 'minecraft:stone_shovel', 'minecraft:wooden_shovel']) {
-        if (await this.equipItemSpec(shovel)) return;
+      for (const shovel of [
+        'minecraft:diamond_shovel',
+        'minecraft:iron_shovel',
+        'minecraft:stone_shovel',
+        'minecraft:wooden_shovel'
+      ]) {
+        if (await this.equipItemSpec(shovel, 'hand')) return true;
       }
-    } else {
+      // Never punch dirt with a pickaxe/sword to avoid wasting tool durability unnecessarily,
+      // unless no empty slot exists
+      return false;
+    }
+
+    if (this._blockRequiresPickaxe(block)) {
       for (const pick of [
+        'minecraft:netherite_pickaxe',
         'minecraft:diamond_pickaxe',
         'minecraft:iron_pickaxe',
+        '#iron_tier_pickaxe',
         'minecraft:stone_pickaxe',
-        'minecraft:wooden_pickaxe'
+        'minecraft:wooden_pickaxe',
+        '#pickaxe'
       ]) {
-        if (await this.equipItemSpec(pick)) return;
+        if (await this.equipItemSpec(pick, 'hand')) return true;
+      }
+      return false;
+    }
+
+    if (this.bot.tool && typeof this.bot.tool.equipForBlock === 'function') {
+      try {
+        await this.bot.tool.equipForBlock(block, {});
+        return true;
+      } catch (_) {
+        // Safe fallback
       }
     }
+    return false;
   }
 
   /**
@@ -1020,8 +1167,22 @@ class AutonomousProgressionEngine extends EventEmitter {
       return true;
     }
 
-    if (!options.skipEquip) {
-      await this.equipBestToolForBlock(freshBlock);
+    // Always verify/equip AFTER `_safeGotoNear` because `mineflayer-pathfinder` can swap `heldItem`
+    // to dirt/scaffolding or shovel while walking! (`equipItemSpec` is 0ms no-op if already held.)
+    await this.equipBestToolForBlock(freshBlock);
+
+    // Hard survival guardrail: NEVER punch stone/ores bare-handed without a pickaxe!
+    if (this._blockRequiresPickaxe(freshBlock)) {
+      if (!matchesItemSpec(this.getHeldCanonicalId(), '#pickaxe')) {
+        const equippedPick = await this.equipItemSpec('#pickaxe', 'hand');
+        if (!equippedPick && !this.findInventoryItem('#pickaxe')) {
+          this._log(
+            'warn',
+            `Refusing to mine ${freshBlock.name} bare-handed — crafting a pickaxe first!`
+          );
+          return false;
+        }
+      }
     }
 
     if (typeof this.bot.dig === 'function') {
@@ -1125,13 +1286,34 @@ class AutonomousProgressionEngine extends EventEmitter {
     return null;
   }
 
+  _findOpenStationSpotNear(preferredPos) {
+    if (typeof this.bot?.blockAt !== 'function') return preferredPos;
+
+    for (let r = 0; r <= 4; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (r > 0 && Math.abs(dx) !== r && Math.abs(dz) !== r) continue;
+          for (const dy of [0, 1, -1, 2, -2]) {
+            const cand = preferredPos.offset(dx, dy, dz).floored();
+            if (this._isDryStandableSpot(cand)) {
+              return cand;
+            }
+          }
+        }
+      }
+    }
+    return preferredPos;
+  }
+
   /**
    * Places a station block (`crafting_table`, `furnace`, `blast_furnace`, `chest`, GTCEu machine)
-   * cleanly at a relative offset from Base Camp, stepping clear of the target voxel's AABB first!
+   * cleanly at a relative offset from Base Camp, adapting to uneven hills, stepping clear of the
+   * target voxel's AABB, re-equipping after pathfinding, and verifying world placement!
    */
   async placeStationAtBase(itemSpec, stationKey, relOffset, options = {}) {
     const base = this.ensureBaseAnchor();
-    const targetPos = base.plus(new Vec3(relOffset.x, relOffset.y, relOffset.z)).floored();
+    const rawPos = base.plus(new Vec3(relOffset.x, relOffset.y, relOffset.z)).floored();
+    const targetPos = this._findOpenStationSpotNear(rawPos);
 
     if (!(await this.equipItemSpec(itemSpec, 'hand'))) {
       return null;
@@ -1153,21 +1335,32 @@ class AutonomousProgressionEngine extends EventEmitter {
           } catch (_) {
             // Continue
           }
-          await this.equipItemSpec(itemSpec, 'hand');
         }
       }
 
-      // Clear replaceable grass/snow/flowers at targetPos
+      // Clear replaceable tall_grass/short_grass/snow/flowers at targetPos
       const existing = this.bot.blockAt(targetPos);
       if (existing && existing.type !== 0 && existing.name !== 'air' && existing.boundingBox === 'empty') {
         await this.digAndCollectBlock(existing);
-        await this.equipItemSpec(itemSpec, 'hand');
       }
     }
 
     // Stand clear so player 0.6x1.8 AABB never overlaps targetPos [tx..tx+1] during `placeBlock`!
-    const standPos = targetPos.offset(2, 0, 0);
-    await this._safeGotoNear(standPos, 0, 8000);
+    const standOffsets = [
+      new Vec3(2, 0, 0),
+      new Vec3(-2, 0, 0),
+      new Vec3(0, 0, 2),
+      new Vec3(0, 0, -2)
+    ];
+    let standPos = targetPos.plus(standOffsets[0]);
+    for (const off of standOffsets) {
+      const candStand = targetPos.plus(off);
+      if (this._isDryStandableSpot(candStand)) {
+        standPos = candStand;
+        break;
+      }
+    }
+    await this._safeGotoNear(standPos, 1, 8000);
     if (this.bot?.entity?.position) {
       const p = this.bot.entity.position;
       const overlapsTarget =
@@ -1178,8 +1371,13 @@ class AutonomousProgressionEngine extends EventEmitter {
         p.y + 1.85 > targetPos.y &&
         p.y < targetPos.y + 1;
       if (overlapsTarget) {
-        await this._safeGotoNear(targetPos.offset(-2, 0, 0), 0, 5000);
+        await this._safeGotoNear(targetPos.offset(-2, 0, 0), 1, 5000);
       }
+    }
+
+    // Re-equip AFTER `_safeGotoNear` in case `pathfinder` changed heldItem on the walk!
+    if (!(await this.equipItemSpec(itemSpec, 'hand'))) {
+      return null;
     }
 
     const refBlock = this.bot?.blockAt ? this.bot.blockAt(targetPos.offset(0, -1, 0)) : null;
@@ -1187,7 +1385,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       try {
         await this.bot.placeBlock(refBlock, new Vec3(0, 1, 0));
       } catch (_) {
-        // Fallback packet placement via multiblockBuilder helper if placeBlock raycast timed out
+        // Fallback packet placement if placeBlock raycast timed out
         if (this.bot?._client?.write) {
           this.bot._client.write('block_place', {
             hand: 0,
@@ -1203,7 +1401,15 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
     }
 
-    await this._delay(40);
+    await this._delay(60);
+
+    // Verify the block actually appeared in the world before persisting station coordinates!
+    if (this.bot?.blockAt) {
+      const placed = this.bot.blockAt(targetPos);
+      if (!placed || placed.type === 0 || placed.name === 'air') {
+        return null;
+      }
+    }
 
     // Optional rain-shield roof 3 blocks overhead for LV+ electric machines!
     if (options.buildRainRoof && this.bot?.blockAt) {
@@ -1403,17 +1609,35 @@ class AutonomousProgressionEngine extends EventEmitter {
     let equippedOnce = false;
     let lastPos = batch[0];
 
+    const beforeCount = this.countInventory(targetSpec);
+    let dugCount = 0;
+
     for (const pos of batch) {
       if (this.countInventory(targetSpec) >= targetCount) break;
       if (this.navigator?.hasAdjacentLava(pos)) continue;
       const blk = this.bot.blockAt(pos);
       if (!blk || blk.type === 0) continue;
-      if (!equippedOnce) {
-        await this.equipBestToolForBlock(blk);
-        equippedOnce = true;
-      }
       lastPos = pos;
-      await this.digAndCollectBlock(blk, { skipCollect: true, skipEquip: true });
+      const dug = await this.digAndCollectBlock(blk, { skipCollect: true });
+      if (!dug) break;
+      dugCount++;
+
+      // Live-server zero-drop sanity check: after digging 2 stone blocks, collect and verify drops
+      // actually incremented so we never keep swinging if the server had a slot desync!
+      if (isStoneQuery && dugCount === 2 && this.bot?._client) {
+        await this.collectNearbyDrops(lastPos, 6);
+        if (this.countInventory(targetSpec) <= beforeCount && this.bot.inventory) {
+          await this._syncWindowSafe(this.bot.inventory, 600);
+          if (!this.findInventoryItem('#pickaxe')) {
+            this._log(
+              'warn',
+              'Server inventory sync revealed no pickaxe after zero-drop check — returning to craft pickaxe!'
+            );
+            return false;
+          }
+          await this.equipItemSpec('#pickaxe', 'hand');
+        }
+      }
     }
 
     await this.collectNearbyDrops(lastPos, 7);
@@ -1670,7 +1894,7 @@ class AutonomousProgressionEngine extends EventEmitter {
     }
   }
 
-  async _waitForResultSlot(window, maxWaitMs = 90) {
+  async _waitForResultSlot(window, maxWaitMs = 450) {
     if (window.slots?.[0]) return true;
     if (typeof window.once === 'function') {
       let timer = null;
@@ -1686,9 +1910,9 @@ class AutonomousProgressionEngine extends EventEmitter {
       }
       return Boolean(window.slots?.[0]);
     }
-    for (let wait = 0; wait < 3; wait++) {
+    for (let wait = 0; wait < 4; wait++) {
       if (window.slots?.[0]) return true;
-      await this._delay(25);
+      await this._delay(40);
     }
     return Boolean(window.slots?.[0]);
   }
@@ -1731,10 +1955,10 @@ class AutonomousProgressionEngine extends EventEmitter {
             await this.bot.clickWindow(srcSlotObj.slot, 0, 0);
           }
         }
-        await this._waitForResultSlot(inv, 120);
+        await this._waitForResultSlot(inv, 450);
         if (inv.slots[0]) {
           await this.bot.clickWindow(0, 0, 1);
-          await this._syncWindowSafe(inv, 180);
+          await this._syncWindowSafe(inv, 650);
         }
         if (inv.slots[1]) {
           await this.bot.clickWindow(1, 0, 1);
@@ -1816,7 +2040,7 @@ class AutonomousProgressionEngine extends EventEmitter {
     }
     await this._safeGotoNear(tableBlock.position, 2, 8000);
     this._sharedTableWindow = await this.bot.openBlock(tableBlock);
-    guardWindowSlot0Listeners(this._sharedTableWindow, 80);
+    guardWindowSlot0Listeners(this._sharedTableWindow, 140);
     try {
       return await fn();
     } finally {
@@ -1828,6 +2052,9 @@ class AutonomousProgressionEngine extends EventEmitter {
         } catch (_) {
           // Safe close fallback
         }
+      }
+      if (this.bot?.inventory) {
+        await this._syncWindowSafe(this.bot.inventory, 650);
       }
     }
   }
@@ -2035,7 +2262,7 @@ class AutonomousProgressionEngine extends EventEmitter {
       gridWidth = 3;
     }
 
-    guardWindowSlot0Listeners(window, 80);
+    guardWindowSlot0Listeners(window, 140);
 
     // Group destination grid slots by ingredient spec so we pick up each stack ONCE
     const specGroups = new Map();
@@ -2087,7 +2314,7 @@ class AutonomousProgressionEngine extends EventEmitter {
           }
         }
 
-        const hasOutput = await this._waitForResultSlot(window, 110);
+        const hasOutput = await this._waitForResultSlot(window, 450);
         if (!hasOutput && !window.slots?.[0]) {
           await this._ensureCleanCraftingGrid(window, maxGridSlot);
           return false;
@@ -2095,7 +2322,7 @@ class AutonomousProgressionEngine extends EventEmitter {
 
         // Shift-click result slot 0 (`mode = 1` quick_move) into player inventory
         await this.bot.clickWindow(0, 0, 1);
-        await this._syncWindowSafe(window, 180);
+        await this._syncWindowSafe(window, 900);
 
         // Reclaim any remaining GTCEu tools (Hammer, File, Wrench, Mortar) left in grid 1..9
         for (let g = 1; g <= maxGridSlot; g++) {
@@ -2111,6 +2338,9 @@ class AutonomousProgressionEngine extends EventEmitter {
           await this.bot.closeWindow(window);
         } catch (_) {
           // Safe close fallback
+        }
+        if (this.bot.inventory) {
+          await this._syncWindowSafe(this.bot.inventory, 650);
         }
       }
     }
@@ -2366,7 +2596,12 @@ class AutonomousProgressionEngine extends EventEmitter {
         }
         await this.craftVanillaItem('crafting_table', 1, false);
       }
-      await this.placeStationAtBase('minecraft:crafting_table', 'craftingTable', { x: 2, y: 0, z: 0 });
+      if (this.countInventory('minecraft:crafting_table') > 0) {
+        await this.placeStationAtBase('minecraft:crafting_table', 'craftingTable', { x: 2, y: 0, z: 0 });
+      }
+      if (!this.getValidStationBlock('craftingTable', 'crafting_table')) {
+        return { stage: 'M02_BASE_AND_CRAFTING_TABLE' };
+      }
     }
 
     if (!this.findInventoryItem('#pickaxe')) {
@@ -2381,6 +2616,13 @@ class AutonomousProgressionEngine extends EventEmitter {
         if (this.countInventory('minecraft:stick') < 2) await this.craftSticksFast(4);
         await this.craftVanillaItem('wooden_pickaxe', 1, true);
       }
+      if (!this.findInventoryItem('#pickaxe')) {
+        return { stage: 'M02_BASE_AND_CRAFTING_TABLE' };
+      }
+      await this.equipItemSpec('#pickaxe', 'hand');
+      this.markMilestoneComplete('M02_BASE_AND_CRAFTING_TABLE');
+    } else if (!this.hasMilestone('M02_BASE_AND_CRAFTING_TABLE')) {
+      await this.equipItemSpec('#pickaxe', 'hand');
       this.markMilestoneComplete('M02_BASE_AND_CRAFTING_TABLE');
     }
 
@@ -2389,6 +2631,10 @@ class AutonomousProgressionEngine extends EventEmitter {
     // -------------------------------------------------------------------------
     if (!this.hasMilestone('M03_STONE_TOOLS_AND_FURNACE')) {
       this._currentMilestoneId = 'M03_STONE_TOOLS_AND_FURNACE';
+
+      if (!this.findInventoryItem('#pickaxe')) {
+        return { stage: 'M02_BASE_AND_CRAFTING_TABLE' };
+      }
 
       // STEP 3A: Upgrade to Stone Pickaxe + Stone Axe AFTER ONLY 6 COBBLESTONE (4x faster mining immediately!)
       if (!this.findInventoryItem(['minecraft:stone_pickaxe', '#iron_tier_pickaxe']) || !this.findInventoryItem('#axe')) {
