@@ -115,9 +115,10 @@ class GTNHNavigator extends EventEmitter {
     moves.dontCreateFlow = true;
     moves.dontMineUnderFallingBlock = true;
     moves.allow1by1towers = false;
-    moves.allowParkour = false;
+    moves.allowSprinting = this.options.allowSprinting !== false;
+    moves.allowParkour = this.options.allowParkour !== false;
     moves.canDig = Boolean(this.options.canDigInWild);
-    moves.digCost = 4;
+    moves.digCost = this.options.digCost ?? 1.2;
     moves.liquidCost = 8;
 
     for (const blockName of DEFAULT_HAZARD_BLOCK_NAMES) {

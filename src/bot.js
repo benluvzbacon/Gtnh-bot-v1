@@ -148,7 +148,7 @@ class GTLAutomationAgent extends EventEmitter {
     this.warehouse = new WarehouseTracker({ registryBridge: this.registryBridge });
     this.containerController = new ContainerPacketController(null, {
       registryBridge: this.registryBridge,
-      clickDelayMs: configOverrides.clickDelayMs ?? 55
+      clickDelayMs: configOverrides.clickDelayMs ?? 10
     });
     this.craftingEngine = new CraftingEngine({
       registryBridge: this.registryBridge,
